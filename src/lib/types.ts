@@ -85,6 +85,8 @@ export interface Settings {
   barkUrl: string;
   /** 飞书群自定义机器人 webhook；为空表示不启用。多个用分号分隔。 */
   feishuWebhook: string;
+  /** Discord 频道 webhook；为空表示不启用。多个用分号分隔。 */
+  discordWebhook: string;
   soundEnabled: boolean;
   openBagOnHit: boolean;
   /** 代理地址列表；每个代理是一条额外的出口线路，被拦时切换。可为空。 */

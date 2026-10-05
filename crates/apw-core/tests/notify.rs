@@ -6,13 +6,13 @@
 
 #![cfg(feature = "notifications")]
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use apw_core::notify::{Bark, Feishu, Multi, Notification, Notifier, NotifyError, Sound};
+use apw_core::notify::{Bark, Discord, Feishu, Multi, Notification, Notifier, NotifyError, Sound};
 
 // ---------------------------------------------------------------------------
 // 极简 HTTP 测试服务端
@@ -25,6 +25,7 @@ use apw_core::notify::{Bark, Feishu, Multi, Notification, Notifier, NotifyError,
 struct TestServer {
     addr: SocketAddr,
     requests: Arc<Mutex<Vec<String>>>,
+    bodies: Arc<Mutex<Vec<String>>>,
     join: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -45,9 +46,11 @@ impl TestServer {
         let listener = TcpListener::bind("127.0.0.1:0").expect("绑定本地端口");
         let addr = listener.local_addr().expect("取本地地址");
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let bodies = Arc::new(Mutex::new(Vec::new()));
 
         let join = {
             let requests = Arc::clone(&requests);
+            let bodies = Arc::clone(&bodies);
             std::thread::spawn(move || {
                 // 不应答时也要把连接握住：一旦提前析构，客户端拿到的就是连接被
                 // 重置，测出来的是另一回事。
@@ -68,19 +71,34 @@ impl TestServer {
                         break;
                     }
                     // 把请求头读完，避免客户端还没写完我们就把连接关了。
+                    let mut content_length = 0;
                     loop {
                         let mut header = String::new();
                         match reader.read_line(&mut header) {
                             Ok(0) => break,
                             Ok(_) if header.trim().is_empty() => break,
-                            Ok(_) => {}
+                            Ok(_) => {
+                                if let Some((name, value)) = header.split_once(':') {
+                                    if name.eq_ignore_ascii_case("content-length") {
+                                        content_length = value.trim().parse().unwrap_or(0);
+                                    }
+                                }
+                            }
                             Err(_) => break,
                         }
+                    }
+                    let mut body = vec![0; content_length];
+                    if reader.read_exact(&mut body).is_err() {
+                        continue;
                     }
                     requests
                         .lock()
                         .expect("记录请求")
                         .push(request_line.trim_end().to_string());
+                    bodies
+                        .lock()
+                        .expect("记录正文")
+                        .push(String::from_utf8_lossy(&body).into_owned());
 
                     let Some((status_line, body)) = respond else {
                         held.push(stream);
@@ -101,6 +119,7 @@ impl TestServer {
         Self {
             addr,
             requests,
+            bodies,
             join: Some(join),
         }
     }
@@ -126,6 +145,24 @@ impl TestServer {
             .nth(1)
             .unwrap_or_default()
             .to_string()
+    }
+
+    fn request_line(&self) -> String {
+        self.requests
+            .lock()
+            .expect("读请求")
+            .first()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn body(&self) -> String {
+        self.bodies
+            .lock()
+            .expect("读正文")
+            .first()
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -172,6 +209,56 @@ fn client() -> reqwest::Client {
 fn 到货通知() -> Notification {
     Notification::new("到货/提醒", "上海-环球港 iPhone 17 有货")
         .with_url("https://www.apple.com.cn/shop/bag?step=1&next=2")
+}
+
+#[tokio::test]
+async fn discord使用post_json并保留通知内容() {
+    let server = TestServer::start("200 OK", r#"{"id":"123"}"#);
+    let webhook = format!(
+        "http://{}/api/webhooks/123/SECRET?thread_id=456&wait=false",
+        server.addr
+    );
+    Discord::new(webhook, client())
+        .notify(&到货通知())
+        .await
+        .expect("Discord webhook 应发送成功");
+    let line = server.request_line();
+    assert!(line.starts_with("POST /api/webhooks/123/SECRET?"), "{line}");
+    assert!(line.contains("thread_id=456"), "{line}");
+    assert!(line.contains("wait=true"), "{line}");
+    assert!(!line.contains("wait=false"), "{line}");
+    let body: serde_json::Value = serde_json::from_str(&server.body()).expect("JSON 正文");
+    assert_eq!(
+        body["content"],
+        "到货/提醒\n上海-环球港 iPhone 17 有货\nhttps://www.apple.com.cn/shop/bag?step=1&next=2"
+    );
+    assert_eq!(body["allowed_mentions"]["parse"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn discord拒绝推送时报告状态码() {
+    let server = TestServer::start("400 Bad Request", r#"{"message":"bad payload"}"#);
+    let webhook = format!("http://{}/api/webhooks/123/SECRET", server.addr);
+    let err = Discord::new(webhook, client())
+        .notify(&到货通知())
+        .await
+        .expect_err("HTTP 400 应报错");
+    assert!(
+        matches!(err, NotifyError::Rejected { status: 400, .. }),
+        "{err}"
+    );
+    assert!(!err.to_string().contains("SECRET"));
+}
+
+#[tokio::test]
+async fn discord连不上时不泄露webhook密钥() {
+    let addr = closed_port();
+    let err = Discord::new(format!("http://{addr}/api/webhooks/123/SECRET"), client())
+        .notify(&到货通知())
+        .await
+        .expect_err("端口无人监听");
+    assert!(matches!(err, NotifyError::Transport { .. }), "{err}");
+    assert!(!err.to_string().contains("SECRET"));
 }
 
 // ---------------------------------------------------------------------------

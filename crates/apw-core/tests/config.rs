@@ -88,6 +88,7 @@ fn 样例设置() -> Settings {
         interval_seconds: 45,
         bark_url: "https://api.day.app/xxxx".into(),
         feishu_webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/yyyy".into(),
+        discord_webhook: "https://discord.com/api/webhooks/123/token".into(),
         sound_enabled: false,
         open_bag_on_hit: true,
         proxies: Vec::new(),
@@ -107,6 +108,19 @@ fn 存取往返内容不变() {
     // 再存再取仍然一致：规范化不能每过一轮就悄悄改一点内容。
     store.save(&got).expect("再次保存失败");
     assert_eq!(store.load().expect("再次读取失败"), want);
+}
+
+#[cfg(unix)]
+#[test]
+fn 设置文件只有当前用户可读写() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = 临时目录::new("private");
+    let path = dir.设置路径();
+    SettingsStore::at(path.clone())
+        .save(&样例设置())
+        .expect("保存失败");
+    let mode = fs::metadata(path).expect("读取权限").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
 }
 
 #[test]
@@ -498,6 +512,7 @@ fn 设置的线上格式是小驼峰() {
         "intervalSeconds",
         "barkUrl",
         "feishuWebhook",
+        "discordWebhook",
         "soundEnabled",
         "openBagOnHit",
         "proxies",
@@ -505,7 +520,7 @@ fn 设置的线上格式是小驼峰() {
         assert!(obj.contains_key(key), "缺少字段 {key}：{value}");
     }
     assert!(!obj.contains_key("interval_seconds"), "不该有蛇形字段");
-    assert_eq!(obj.len(), 8);
+    assert_eq!(obj.len(), 9);
 }
 
 #[test]
@@ -598,7 +613,7 @@ fn 代理地址只留合法的并去重() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn 推送地址按长相归到bark或飞书() {
+fn 推送地址按长相归到各渠道() {
     use apw_core::config::{PushKind, push_kind};
 
     for feishu in [
@@ -610,6 +625,14 @@ fn 推送地址按长相归到bark或飞书() {
     ] {
         assert_eq!(push_kind(feishu), PushKind::Feishu, "{feishu:?}");
     }
+    for discord in [
+        "https://discord.com/api/webhooks/123/token",
+        "https://discord.com/api/v10/webhooks/123/token?thread_id=456",
+        "https://canary.discord.com/api/webhooks/123/token",
+        "discord.com/api/webhooks/123/token",
+    ] {
+        assert_eq!(push_kind(discord), PushKind::Discord, "{discord:?}");
+    }
     for bark in [
         "https://api.day.app/key",
         "https://api.day.app/key?group=库存&sound=alarm",
@@ -618,6 +641,8 @@ fn 推送地址按长相归到bark或飞书() {
         // 只看路径：飞书地址出现在查询参数里不算。
         "https://api.day.app/key?url=https://open.feishu.cn/open-apis/bot/v2/hook/x",
         "不是地址",
+        "https://discord.com.evil.example/api/webhooks/123/token",
+        "https://api.day.app/key?next=https://discord.com/api/webhooks/123/token",
     ] {
         assert_eq!(push_kind(bark), PushKind::Bark, "{bark:?}");
     }
@@ -628,6 +653,7 @@ fn 推送地址整组替换时各归各的渠道并去重() {
     let b1 = "https://api.day.app/b1";
     let b2 = "https://api.day.app/b2";
     let f1 = "https://open.feishu.cn/open-apis/bot/v2/hook/f1";
+    let d1 = "https://discord.com/api/webhooks/123/token";
     let mut s = Settings::default();
     s.set_push_urls(&[
         format!(" {f1} "),
@@ -635,14 +661,16 @@ fn 推送地址整组替换时各归各的渠道并去重() {
         String::new(),
         // 老版本里用分号连着的一整串被粘进了同一行。
         format!("{b2};{b1}"),
+        d1.to_string(),
     ]);
     assert_eq!(s.bark_url, format!("{b1};{b2}"));
     assert_eq!(s.feishu_webhook, f1);
+    assert_eq!(s.discord_webhook, d1);
     // 读回来是 Bark 在前、飞书在后，各自保持填写顺序。
-    assert_eq!(s.push_urls(), vec![b1, b2, f1]);
+    assert_eq!(s.push_urls(), vec![b1, b2, f1, d1]);
 
     s.set_push_urls(&[]);
-    assert!(s.bark_url.is_empty() && s.feishu_webhook.is_empty());
+    assert!(s.bark_url.is_empty() && s.feishu_webhook.is_empty() && s.discord_webhook.is_empty());
     assert!(s.push_urls().is_empty());
 }
 
@@ -662,6 +690,21 @@ fn 填在bark一栏的飞书地址规范化后挪到飞书() {
     );
 
     // 再规范化一次结果不变。
+    let once = s.clone();
+    s.normalize();
+    assert_eq!(s, once);
+}
+
+#[test]
+fn 旧配置里误存到bark的discord地址自动迁移() {
+    let discord = "https://discord.com/api/webhooks/123/token";
+    let mut s = Settings {
+        bark_url: format!("https://api.day.app/b1;{discord}"),
+        ..Settings::default()
+    };
+    s.normalize();
+    assert_eq!(s.bark_url, "https://api.day.app/b1");
+    assert_eq!(s.discord_webhook, discord);
     let once = s.clone();
     s.normalize();
     assert_eq!(s, once);

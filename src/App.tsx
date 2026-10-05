@@ -268,7 +268,7 @@ export default function App() {
   const [families, setFamilies] = useState<string[]>([]);
   const [capacities, setCapacities] = useState<string[]>([]);
   const [colors, setColors] = useState<string[]>([]);
-  // 推送地址：Bark 和飞书是同一个列表，一行一个。null 表示还没动过，跟着后端走；
+  // 推送地址：各渠道共用一个列表，一行一个。null 表示还没动过，跟着后端走；
   // 动过之后以这份为准，保持用户填写的顺序，渠道标签按后端的归类显示。
   const [pushDraft, setPushDraft] = useState<string[] | null>(null);
   // 代理地址和推送地址一样一行一个，草稿的规矩也相同，见 pushDraft。
@@ -784,7 +784,7 @@ export default function App() {
                   推送地址（可选）
                 </Label>
                 <span className="text-muted-foreground min-w-0 truncate text-xs leading-none">
-                  Bark 或飞书群机器人，一行一个，自动识别
+                  Bark、飞书或 Discord webhook，一行一个，自动识别
                 </span>
                 {lastPushRow.trim() !== "" && (
                   <Button
@@ -822,7 +822,7 @@ export default function App() {
                       id={`push-${index}`}
                       aria-label={`推送地址 ${index + 1}`}
                       className="select-text"
-                      placeholder="粘贴 Bark 地址，或飞书群机器人的 webhook 地址"
+                      placeholder="粘贴 Bark、飞书或 Discord webhook 地址"
                       value={row}
                       // 只有点「添加」新开的那一行自动聚焦；启动时的空行不抢焦点。
                       autoFocus={pushDraft !== null && row === "" && index > 0}

@@ -15,7 +15,7 @@ use apw_core::apple::{AppleClient, ClientConfig};
 use apw_core::catalog::Catalog;
 use apw_core::config::{MIN_INTERVAL_SECONDS, Settings, SettingsStore};
 use apw_core::model::{Category, Product, REGIONS, Store, Target, region_by_locale};
-use apw_core::notify::{Bark, Feishu, Multi, Notification, Notifier, Sound};
+use apw_core::notify::{Bark, Discord, Feishu, Multi, Notification, Notifier, Sound};
 use apw_core::watcher::{Event, TargetState, Watcher, WatcherConfig};
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
@@ -308,7 +308,7 @@ async fn test_notify(app: AppHandle) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-/// 发出一条提醒：系统通知 + 提示音 + Bark，按用户设置取舍。
+/// 发出一条提醒：系统通知、提示音和配置的远程渠道。
 async fn dispatch_notification(
     app: &AppHandle,
     notification: Notification,
@@ -347,6 +347,15 @@ async fn dispatch_notification(
         // 共享连接池，渠道各自报错。
         for feishu in Feishu::from_list(&settings.feishu_webhook, http) {
             channels.push(feishu);
+        }
+    }
+    if !settings.discord_webhook.trim().is_empty() {
+        let http = app
+            .try_state::<AppState>()
+            .map(|s| s.http.clone())
+            .unwrap_or_default();
+        for discord in Discord::from_list(&settings.discord_webhook, http) {
+            channels.push(discord);
         }
     }
     if channels.is_empty() {
