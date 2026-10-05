@@ -7,12 +7,14 @@ const push = loadSource("src/lib/push.ts");
 const K1 = "https://api.day.app/k1";
 const K2 = "https://api.day.app/k2";
 const F1 = "https://open.feishu.cn/open-apis/bot/v2/hook/f1";
+const D1 = "https://discord.com/api/webhooks/123/token";
 
-test("saved addresses are read back Bark first, and a missing Feishu field reads as empty", () => {
-  assert.deepEqual(push.savedPushAddresses({ barkUrl: `${K1};${K2}`, feishuWebhook: F1 }), [
+test("saved addresses are read back by channel, and missing fields read as empty", () => {
+  assert.deepEqual(push.savedPushAddresses({ barkUrl: `${K1};${K2}`, feishuWebhook: F1, discordWebhook: D1 }), [
     { url: K1, kind: "bark" },
     { url: K2, kind: "bark" },
     { url: F1, kind: "feishu" },
+    { url: D1, kind: "discord" },
   ]);
   assert.deepEqual(push.savedPushAddresses({ barkUrl: "" }), []);
 });
@@ -35,4 +37,5 @@ test("the collapsed summary counts addresses per channel", () => {
     "推送：Bark 2 个、飞书 1 个",
   );
   assert.equal(push.pushSummary(push.savedPushAddresses({ barkUrl: "", feishuWebhook: F1 })), "推送：飞书 1 个");
+  assert.equal(push.pushSummary(push.savedPushAddresses({ barkUrl: "", discordWebhook: D1 })), "推送：Discord 1 个");
 });

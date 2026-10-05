@@ -682,6 +682,144 @@ fn feishu_business_error(body: &[u8]) -> Option<(i64, String)> {
 }
 
 // ---------------------------------------------------------------------------
+// Discord webhook
+// ---------------------------------------------------------------------------
+
+const DISCORD: &str = "Discord";
+const DISCORD_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 向 Discord webhook 发送普通文本通知。
+#[derive(Debug, Clone)]
+pub struct Discord {
+    webhook: String,
+    http: reqwest::Client,
+    timeout: Duration,
+    name: String,
+}
+
+impl Discord {
+    pub fn new(webhook: String, http: reqwest::Client) -> Self {
+        Self {
+            webhook: webhook.trim().to_string(),
+            http,
+            timeout: DISCORD_TIMEOUT,
+            name: DISCORD.to_string(),
+        }
+    }
+
+    pub fn from_list(raw: &str, http: reqwest::Client) -> Vec<Self> {
+        let urls = split_bark_urls(raw);
+        let many = urls.len() > 1;
+        urls.into_iter()
+            .enumerate()
+            .map(|(i, url)| {
+                let mut discord = Self::new(url, http.clone());
+                if many {
+                    discord.name = format!("{DISCORD} #{}", i + 1);
+                }
+                discord
+            })
+            .collect()
+    }
+
+    pub fn is_configured(&self) -> bool {
+        !self.webhook.is_empty()
+    }
+}
+
+impl Notifier for Discord {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn notify(&self, n: &Notification) -> Result<(), NotifyError> {
+        if !self.is_configured() {
+            return Ok(());
+        }
+
+        let mut url = validate_discord_webhook(&self.webhook)?;
+        // Discord 默认返回 204；wait=true 可以确认消息确实保存成功。
+        let existing_query: Vec<_> = url
+            .query_pairs()
+            .filter(|(key, _)| key != "wait")
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        url.set_query(None);
+        {
+            let mut query = url.query_pairs_mut();
+            query.extend_pairs(existing_query);
+            query.append_pair("wait", "true");
+        }
+        let content = feishu_text(n);
+        if content.chars().count() > 2000 {
+            return Err(discord_config_err(
+                "消息超过 Discord 的 2000 字符限制".to_string(),
+            ));
+        }
+        let mut resp = self
+            .http
+            .post(url)
+            .timeout(self.timeout)
+            .json(&serde_json::json!({
+                "content": content,
+                "allowed_mentions": { "parse": [] },
+            }))
+            .send()
+            .await
+            .map_err(|e| NotifyError::Transport {
+                channel: self.name.clone(),
+                detail: describe_http_error(e),
+            })?;
+
+        let status = resp.status();
+        let body = read_capped(&mut resp, BARK_MAX_BODY, &self.name).await?;
+        if !status.is_success() {
+            return Err(NotifyError::Rejected {
+                channel: self.name.clone(),
+                status: status.as_u16(),
+                body: summarize(&body),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn validate_discord_webhook(webhook: &str) -> Result<Url, NotifyError> {
+    let u = Url::parse(webhook).map_err(|e| discord_config_err(format!("地址无法解析：{e}")))?;
+    if !matches!(u.scheme(), "http" | "https") || u.host_str().unwrap_or_default().is_empty() {
+        return Err(discord_config_err(format!(
+            "地址必须是以 http:// 或 https:// 开头的完整地址，当前为 {}",
+            redacted(&u)
+        )));
+    }
+    let segments: Vec<_> = u.path_segments().map(Iterator::collect).unwrap_or_default();
+    let valid = match segments.as_slice() {
+        ["api", "webhooks", id, token] => !id.is_empty() && !token.is_empty(),
+        ["api", version, "webhooks", id, token] => {
+            version.len() > 1
+                && version.starts_with('v')
+                && version[1..].chars().all(|c| c.is_ascii_digit())
+                && !id.is_empty()
+                && !token.is_empty()
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err(discord_config_err(
+            "地址应形如 https://discord.com/api/webhooks/<ID>/<Token>".to_string(),
+        ));
+    }
+    Ok(u)
+}
+
+fn discord_config_err(detail: String) -> NotifyError {
+    NotifyError::Config {
+        channel: DISCORD.to_string(),
+        detail,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 本地提示音
 // ---------------------------------------------------------------------------
 

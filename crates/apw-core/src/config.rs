@@ -19,6 +19,8 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -145,6 +147,8 @@ pub struct Settings {
     /// [`Settings::bark_url`]。创建机器人时安全设置选「自定义关键词」并填
     /// 「有货」即可，提醒标题「有货了」天然命中。
     pub feishu_webhook: String,
+    /// Discord 频道 webhook 地址；旧版误归到 Bark 的地址会在规范化时迁入。
+    pub discord_webhook: String,
     /// 有货时是否播放提示音。
     pub sound_enabled: bool,
     /// 有货时是否自动打开购物袋页面。
@@ -170,6 +174,7 @@ impl Default for Settings {
             interval_seconds: DEFAULT_INTERVAL_SECONDS,
             bark_url: String::new(),
             feishu_webhook: String::new(),
+            discord_webhook: String::new(),
             sound_enabled: true,
             open_bag_on_hit: true,
             proxies: Vec::new(),
@@ -244,10 +249,13 @@ impl Settings {
         split_bark_urls(&self.bark_url)
     }
 
-    /// 全部推送地址：Bark 在前、飞书在后，各自保持填写顺序，去掉重复。
+    /// 全部推送地址：Bark、飞书、Discord 依次排列，去掉重复。
     pub fn push_urls(&self) -> Vec<String> {
         let mut all = split_bark_urls(&self.bark_url);
-        for url in split_bark_urls(&self.feishu_webhook) {
+        for url in split_bark_urls(&self.feishu_webhook)
+            .into_iter()
+            .chain(split_bark_urls(&self.discord_webhook))
+        {
             if !all.contains(&url) {
                 all.push(url);
             }
@@ -262,14 +270,17 @@ impl Settings {
     pub fn set_push_urls(&mut self, urls: &[String]) {
         let mut bark: Vec<String> = Vec::new();
         let mut feishu: Vec<String> = Vec::new();
+        let mut discord: Vec<String> = Vec::new();
         for url in split_bark_urls(&urls.join("\n")) {
             match push_kind(&url) {
                 PushKind::Bark => bark.push(url),
                 PushKind::Feishu => feishu.push(url),
+                PushKind::Discord => discord.push(url),
             }
         }
         self.bark_url = bark.join(";");
         self.feishu_webhook = feishu.join(";");
+        self.discord_webhook = discord.join(";");
     }
 }
 
@@ -278,6 +289,7 @@ impl Settings {
 pub enum PushKind {
     Bark,
     Feishu,
+    Discord,
 }
 
 /// 飞书（含 Lark 国际版）群机器人 webhook 固定的路径前缀。
@@ -290,6 +302,22 @@ const FEISHU_HOOK_PATH: &str = "/open-apis/bot/v2/hook/";
 /// 抄一份：抄一份，迟早会有一边先认了新渠道、另一边还按老规矩归类。
 pub fn push_kind(url: &str) -> PushKind {
     let url = url.trim();
+    if let Ok(parsed) = reqwest::Url::parse(url) {
+        let host = parsed.host_str().unwrap_or_default();
+        if matches!(
+            host,
+            "discord.com" | "discordapp.com" | "canary.discord.com" | "ptb.discord.com"
+        ) && (parsed.path().starts_with("/api/webhooks/")
+            || parsed.path().starts_with("/api/v10/webhooks/"))
+        {
+            return PushKind::Discord;
+        }
+    } else if url.starts_with("discord.com/api/webhooks/")
+        || url.starts_with("discordapp.com/api/webhooks/")
+    {
+        // 漏写协议时仍归到 Discord，以便发送时报清楚的配置错误。
+        return PushKind::Discord;
+    }
     let feishu = match reqwest::Url::parse(url) {
         Ok(parsed) => parsed.path().starts_with(FEISHU_HOOK_PATH),
         // 漏写协议之类解析不了的地址按字面找：先归对渠道，发送时报的错才对得上号。
@@ -554,11 +582,12 @@ fn create_temp_file(dir: &Path) -> Result<(TempFile, File), ConfigError> {
     for _ in 0..32 {
         let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
         let candidate = dir.join(format!(".apw-settings-{}-{seq}.tmp", std::process::id()));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        // 设置里有 Bark、飞书和 Discord 的推送密钥，不能沿用 umask=022 时的 0644。
+        #[cfg(unix)]
+        options.mode(0o600);
+        match options.open(&candidate) {
             Ok(file) => {
                 return Ok((
                     TempFile {
@@ -680,6 +709,7 @@ impl LegacySettings {
             bark_url: self.bark_url.unwrap_or(fallback.bark_url),
             // Go 版没有飞书推送，迁移过来的文件一律从空开始。
             feishu_webhook: String::new(),
+            discord_webhook: String::new(),
             sound_enabled: self.sound_enabled.unwrap_or(fallback.sound_enabled),
             open_bag_on_hit: self.open_bag_on_hit.unwrap_or(fallback.open_bag_on_hit),
             // Go 版没有代理设置，迁移过来的文件一律从空开始。

@@ -36,8 +36,9 @@ function renderApp() {
         // 模拟后端分栏存放。真正的归类规则在 Rust 侧，由 crates/apw-core/tests/config.rs 覆盖；
         // 这里只需要让界面拿到「哪个地址存在哪一栏」。
         const feishu = urls.filter((url) => url.includes("/open-apis/bot/v2/hook/"));
-        const bark = urls.filter((url) => !feishu.includes(url));
-        state.settings = { ...state.settings, barkUrl: bark.join(";"), feishuWebhook: feishu.join(";") };
+        const discord = urls.filter((url) => url.startsWith("https://discord.com/api/webhooks/"));
+        const bark = urls.filter((url) => !feishu.includes(url) && !discord.includes(url));
+        state.settings = { ...state.settings, barkUrl: bark.join(";"), feishuWebhook: feishu.join(";"), discordWebhook: discord.join(";") };
       },
     };
     if (specifier.startsWith("@/components/") || specifier === "lucide-react") {
@@ -101,14 +102,15 @@ function renderApp() {
 const K1 = "https://api.day.app/k1";
 const K2 = "https://api.day.app/k2";
 const F1 = "https://open.feishu.cn/open-apis/bot/v2/hook/f1";
+const D1 = "https://discord.com/api/webhooks/123/token";
 
-test("saved push addresses are one list, Bark first then Feishu, labelled by where the backend filed them", () => {
+test("saved push addresses are one list with channel labels", () => {
   const app = renderApp();
   assert.deepEqual(app.pushValues(), ["https://api.day.app/saved-key"]);
   // 没动过时跟着后端走。
-  app.state.settings = { ...app.state.settings, barkUrl: `${K1};${K2}`, feishuWebhook: F1 };
-  assert.deepEqual(app.pushValues(), [K1, K2, F1]);
-  assert.deepEqual(app.pushLabels(), ["Bark", "Bark", "飞书"]);
+  app.state.settings = { ...app.state.settings, barkUrl: `${K1};${K2}`, feishuWebhook: F1, discordWebhook: D1 };
+  assert.deepEqual(app.pushValues(), [K1, K2, F1, D1]);
+  assert.deepEqual(app.pushLabels(), ["Bark", "Bark", "飞书", "Discord"]);
   // 最后一行有内容才给「添加」，界面上最多只有一个空行。
   assert.equal(app.hasAddPush(), true);
 });
