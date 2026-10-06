@@ -1,8 +1,14 @@
 {
   "manifest_version": 3,
-  "name": "Apple Pickup Watcher 自动加车",
-  "version": "0.1.0",
-  "description": "在 Apple Pickup Watcher 检测到有货后，将对应型号加入当前 Chrome 购物袋。",
+  "name": "Apple Pickup Watcher",
+  "version": "0.2.0",
+  "description": "自动加车，并在 Apple 结账页填充本机保存的取货及配送资料。",
+  "permissions": ["storage"],
+  "action": {
+    "default_title": "Apple 结账资料",
+    "default_popup": "popup.html"
+  },
+  "options_page": "profile.html",
   "content_scripts": [
     {
       "matches": [
@@ -13,6 +19,18 @@
       "js": ["content.js"],
       "run_at": "document_idle",
       "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://www.apple.com/shop/*",
+        "https://www.apple.com/*/shop/*",
+        "https://www.apple.com.cn/shop/*",
+        "https://*.store.apple.com/shop/*",
+        "https://*.store.apple.com.cn/shop/*"
+      ],
+      "js": ["profile-fill.js"],
+      "run_at": "document_idle",
+      "world": "ISOLATED"
     }
   ]
 }
