@@ -28,8 +28,10 @@ function section(className) {
 async function run(fields, saved, pathname = '/shop/checkout') {
   let changed;
   let observer;
+  const listeners = new Map();
+  const attributes = new Map();
   const document = {
-    documentElement: {},
+    documentElement: { setAttribute(key, value) { attributes.set(key, value); } },
     querySelectorAll() { return fields; },
     getElementById() { return null; },
   };
@@ -45,14 +47,14 @@ async function run(fields, saved, pathname = '/shop/checkout') {
   };
   vm.runInNewContext(script, {
     chrome, document, location: { pathname },
-    window: { addEventListener() {} },
+    window: { addEventListener(type, listener) { listeners.set(type, listener); } },
     HTMLInputElement: InputElement, HTMLTextAreaElement: class {},
     Event: class { constructor(type) { this.type = type; } },
     MutationObserver: class { constructor(callback) { observer = callback; } observe() {} },
     setTimeout(callback) { callback(); },
   });
   await new Promise(setImmediate);
-  return { changed, observer };
+  return { changed, observer, attributes, requestFill() { listeners.get('apw-request-profile-fill')?.(); } };
 }
 
 const profile = {
@@ -71,7 +73,7 @@ test('fills distinct pickup and delivery contacts without touching billing or ex
   const deliveryAddress = input({ name: 'addressLine1', label: '详细地址', parent: delivery });
   const billingName = input({ name: 'firstName', label: '名', parent: billing });
   const card = input({ name: 'payment.cardNumber', label: '银行卡号', parent: delivery });
-  await run([pickupName, pickupPhone, deliveryName, deliveryAddress, billingName, card], profile);
+  const runtime = await run([pickupName, pickupPhone, deliveryName, deliveryAddress, billingName, card], profile);
   assert.equal(pickupName.value, '小明');
   assert.equal(pickupPhone.value, '用户已经填写');
   assert.equal(deliveryName.value, '李');
@@ -79,6 +81,7 @@ test('fills distinct pickup and delivery contacts without touching billing or ex
   assert.equal(billingName.value, '');
   assert.equal(card.value, '');
   assert.deepEqual(deliveryAddress.events, ['input', 'change']);
+  assert.equal(runtime.attributes.get('data-apw-profile-fill-ready'), '1');
 });
 
 test('only runs in checkout, respects disable switch, and fills later form steps', async () => {
@@ -95,4 +98,8 @@ test('only runs in checkout, respects disable switch, and fills later form steps
   fields.push(later);
   runtime.observer();
   assert.equal(later.value, '100000');
+  const latest = input({ name: 'lastName', parent: delivery });
+  fields.push(latest);
+  runtime.requestFill();
+  assert.equal(latest.value, '李');
 });

@@ -54,6 +54,8 @@ import {
 import {
   changeLocale,
   connect,
+  copyBridgePairingCode,
+  copyPaymentLink,
   dismissUpdate,
   installUpdate,
   openExtensionFolder,
@@ -793,6 +795,9 @@ export default function App() {
                   <Button variant="outline" size="sm" onClick={() => void openExtensionFolder()}>
                     打开扩展目录
                   </Button>
+                  <Button variant="outline" size="sm" onClick={() => void copyBridgePairingCode()}>
+                    复制扩展连接码
+                  </Button>
                 </div>
               </div>
             </div>
@@ -948,6 +953,25 @@ export default function App() {
             </Table>
           </ScrollArea>
         </section>
+
+        {ui.paymentLink && (
+          <section className="bg-card shrink-0 rounded-xl border p-4 shadow-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="font-semibold">支付宝付款链接</h2>
+                <p className="text-muted-foreground text-xs">
+                  {ui.paymentLink.kind === "qr" ? "二维码目标地址可能很快失效" : "支付宝收银台页面"}；付款前请核对商家与金额。
+                </p>
+              </div>
+              <Button variant="outline" size="sm" onClick={() => void copyPaymentLink(ui.paymentLink!.url)}>
+                复制链接
+              </Button>
+            </div>
+            <a className="text-primary mt-2 block truncate text-sm underline" href={ui.paymentLink.url} target="_blank" rel="noreferrer">
+              {ui.paymentLink.url}
+            </a>
+          </section>
+        )}
 
         <section className="bg-card h-28 shrink-0 overflow-hidden rounded-xl border shadow-xs">
           <ScrollArea className="h-full">

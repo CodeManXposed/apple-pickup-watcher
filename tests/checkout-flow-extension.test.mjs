@@ -1,0 +1,220 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import vm from 'node:vm';
+import test from 'node:test';
+
+const script = readFileSync(resolve('browser-extension/checkout-flow.js'), 'utf8');
+
+function button(label, group = null) {
+  return {
+    textContent: label, disabled: false, clicks: 0, style: {},
+    getAttribute(key) { return key === 'aria-label' ? null : null; },
+    getClientRects() { return [1]; },
+    closest(selector) { return selector === '.rs-bag-checkout-mainbutton' ? group : null; },
+    click() { this.clicks++; },
+  };
+}
+
+async function page({ pathname, hash = '', official = [], candidates = [], phase = null, selectors = {}, profileReady = false }) {
+  const location = { pathname, search: '', hash, origin: 'https://www.apple.com.cn' };
+  const history = { state: null, replaceState(_state, _title, url) { this.url = url; } };
+  const notices = new Map();
+  const attributes = new Map();
+  let currentPhase = phase;
+  let clickHandler;
+  const chrome = {
+    runtime: {
+      async sendMessage(message) {
+        if (message.type === 'apw-begin-checkout') currentPhase = 'bag';
+        if (message.type === 'apw-checkout-step') currentPhase = message.phase;
+        return currentPhase ? { phase: currentPhase, storeNumber: 'R683' } : null;
+      },
+    },
+  };
+  const document = {
+    documentElement: {
+      getAttribute(key) { return attributes.get(key) ?? null; },
+      setAttribute(key, value) { attributes.set(key, value); },
+    },
+    body: { appendChild(node) { notices.set(node.id, node); } },
+    getElementById(id) { return notices.get(id) || null; },
+    createElement() { return { style: {}, setAttribute() {}, textContent: '' }; },
+    querySelectorAll(selector) {
+      if (selector in selectors) return selectors[selector];
+      return selector === '[data-autom="checkout"]' ? official : candidates;
+    },
+    querySelector(selector) { return selectors[selector]?.[0] || null; },
+    addEventListener(type, listener) { if (type === 'click') clickHandler = listener; },
+  };
+  const window = {};
+  window.top = window;
+  window.dispatchEvent = (event) => {
+    if (profileReady && event.type === 'apw-request-profile-fill') {
+      attributes.set('data-apw-profile-fill-ready', '1');
+    }
+  };
+  vm.runInNewContext(script, {
+    window, location, history, document, chrome, URLSearchParams, URL, Date,
+    Event: class { constructor(type) { this.type = type; } },
+    MutationObserver: class { observe() {} },
+    setTimeout() { return 1; },
+  });
+  await new Promise(setImmediate);
+  return { history, notices, click(target) { clickHandler?.({ target }); }, get phase() { return currentPhase; } };
+}
+
+test('marked bag clicks the official checkout button once', async () => {
+  const checkout = button('结账', {});
+  const applePay = button('Check out with Apple Pay');
+  const item = { href: 'https://www.apple.com.cn/shop/product/mjye4ch/a',
+    closest() { return { querySelector() { return { value: '1' }; } }; } };
+  const result = await page({
+    pathname: '/shop/bag', hash: '#apw-checkout=1&apw-store=R683&apw-part=MJYE4CH%2FA',
+    official: [checkout], candidates: [applePay],
+    selectors: { '[data-autom="bag-item-name"]': [item] },
+  });
+  assert.equal(checkout.clicks, 1);
+  assert.equal(applePay.clicks, 0);
+  assert.equal(result.phase, 'bag-clicked');
+  assert.equal(result.history.url, '/shop/bag');
+});
+
+test('bag without the exact target SKU does not enter checkout', async () => {
+  const checkout = button('结账', {});
+  const result = await page({
+    pathname: '/shop/bag', hash: '#apw-checkout=1&apw-store=R683&apw-part=MJYE4CH%2FA',
+    official: [checkout], selectors: { '[data-autom="bag-item-name"]': [
+      { href: 'https://www.apple.com.cn/shop/product/otherch/a' },
+    ] },
+  });
+  assert.equal(checkout.clicks, 0);
+  assert.equal(result.phase, null);
+});
+
+test('bag with extra items or target quantity two does not enter checkout', async () => {
+  const checkout = button('结账', {});
+  const target = { href: 'https://www.apple.com.cn/shop/product/mjye4ch/a',
+    closest() { return { querySelector() { return { value: '2' }; } }; } };
+  const base = {
+    pathname: '/shop/bag', hash: '#apw-checkout=1&apw-store=R683&apw-part=MJYE4CH%2FA',
+    official: [checkout],
+  };
+  const quantity = await page({ ...base, selectors: { '[data-autom="bag-item-name"]': [target] } });
+  assert.equal(quantity.phase, null);
+  const extra = await page({ ...base, selectors: { '[data-autom="bag-item-name"]': [target,
+    { href: 'https://www.apple.com.cn/shop/product/mw493fe/a' }] } });
+  assert.equal(extra.phase, null);
+  assert.equal(checkout.clicks, 0);
+});
+
+test('unmarked bag cannot start checkout and guest step does not place an order', async () => {
+  const checkout = button('结账', {});
+  await page({ pathname: '/shop/bag', official: [checkout] });
+  assert.equal(checkout.clicks, 0);
+
+  const guest = button('以游客身份继续');
+  const placeOrder = button('现在下订单');
+  const result = await page({
+    pathname: '/shop/checkout', phase: 'bag-clicked', candidates: [placeOrder, guest],
+  });
+  assert.equal(guest.clicks, 1);
+  assert.equal(placeOrder.clicks, 0);
+  assert.equal(result.phase, 'guest-clicked');
+});
+
+test('pickup fulfillment selects only the monitored store before continuing', async () => {
+  const target = button('上海环球港');
+  target.value = 'R683';
+  target.checked = false;
+  const fulfillment = button('继续');
+  const other = button('其他门店');
+  other.value = 'R999';
+  const selectors = {
+    'input[type="radio"].form-selector-input': [other, target],
+    '[data-autom="fulfillment-continue-button"]': [fulfillment],
+    '[role="dialog"]': [],
+  };
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
+  assert.equal(target.clicks, 1);
+  assert.equal(other.clicks, 0);
+  assert.equal(fulfillment.clicks, 0);
+
+  target.checked = true;
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
+  assert.equal(fulfillment.clicks, 1);
+});
+
+test('contact step waits for profile fill and required fields before continuing', async () => {
+  const continueButton = button('继续');
+  const required = button('');
+  required.name = 'pickupEmail';
+  required.value = '';
+  required.type = 'email';
+  const selectors = {
+    '.rs-pickup-button button': [continueButton],
+    'input[required], textarea[required], select[required], [aria-required="true"]': [required],
+    'input, textarea, select': [required],
+    '[role="dialog"]': [],
+  };
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
+  assert.equal(continueButton.clicks, 0);
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors, profileReady: true });
+  assert.equal(continueButton.clicks, 0);
+  required.value = 'pickup@example.test';
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors, profileReady: true });
+  assert.equal(continueButton.clicks, 1);
+});
+
+test('privacy consent and a missing monitored store stop automatic checkout', async () => {
+  const fulfillment = button('继续');
+  const privacy = button('Apple 和你的数据隐私');
+  const selectors = {
+    '[data-autom="fulfillment-continue-button"]': [fulfillment],
+    'input[type="radio"].form-selector-input': [],
+    '[role="dialog"]': [privacy],
+  };
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
+  assert.equal(fulfillment.clicks, 0);
+
+  selectors['[role="dialog"]'] = [];
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
+  assert.equal(fulfillment.clicks, 0);
+});
+
+test('billing selects Alipay and leaves the final Apple order button to the user', async () => {
+  const alipay = button('支付宝');
+  alipay.id = 'checkout-billing-alipay';
+  alipay.name = 'billing';
+  alipay.value = 'ALIPAY';
+  alipay.checked = false;
+  const other = button('信用卡');
+  other.id = 'checkout-billing-card';
+  other.name = 'billing';
+  other.value = 'CARD';
+  const review = button('继续');
+  const order = button('现在下订单');
+  const selectors = {
+    'input[type="radio"]': [other, alipay],
+    '[data-autom="continue-button-review"]': [review],
+    '[data-autom="continue-button-placeOrder"]': [order],
+    '[role="dialog"]': [],
+  };
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
+  assert.equal(alipay.clicks, 1);
+  assert.equal(review.clicks, 0);
+  assert.equal(order.clicks, 0);
+});
+
+test('records final order only after the Apple order button is clicked', async () => {
+  const order = button('现在下订单');
+  const result = await page({
+    pathname: '/shop/checkout', phase: 'guest-clicked',
+    selectors: { '[data-autom="continue-button-placeOrder"]': [order], '[role="dialog"]': [] },
+  });
+  assert.equal(result.phase, 'guest-clicked');
+  assert.equal(order.clicks, 0);
+  result.click({ closest(selector) { return selector === '[data-autom="continue-button-placeOrder"]' ? order : null; } });
+  await new Promise(setImmediate);
+  assert.equal(result.phase, 'order-submitted');
+});

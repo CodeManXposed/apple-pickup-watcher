@@ -95,6 +95,13 @@ export interface Settings {
   proxies: string[];
 }
 
+/** 当前 Chrome 结账流程得到的支付宝地址，由本机桥接推送。 */
+export interface PaymentLink {
+  url: string;
+  kind: "qr" | "cashier";
+  receivedAt: number;
+}
+
 /** 监控目标的唯一键，与 Rust 侧 Target::key 的构成保持一致。 */
 export function targetKey(t: Target): string {
   return `${t.locale}|${t.storeNumber}|${t.partNumber}`;

@@ -104,6 +104,8 @@
       const value = target && profile[target.context]?.[target.key];
       if (typeof value === 'string' && value.trim()) setValue(field, value.trim());
     }
+    // 结账脚本等待此标记，再尝试点击联系人/配送资料页的“继续”。
+    document.documentElement.setAttribute('data-apw-profile-fill-ready', '1');
   }
 
   function schedule() {
@@ -111,6 +113,8 @@
     scheduled = true;
     setTimeout(() => { scheduled = false; fill(); }, 120);
   }
+
+  window.addEventListener('apw-request-profile-fill', fill);
 
   chrome.storage.local.get(STORAGE_KEY).then((result) => {
     profile = result[STORAGE_KEY] || null;

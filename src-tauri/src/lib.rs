@@ -25,8 +25,10 @@ use tauri_plugin_updater::UpdaterExt;
 
 mod auto_open;
 mod notification_queue;
+mod payment_bridge;
 
 use auto_open::AutoOpenBag;
+use payment_bridge::{PaymentBridge, PaymentLink};
 
 /// 前端事件通道名。前端用 `listen("watcher://event", ...)` 订阅。
 const EVENT_CHANNEL: &str = "watcher://event";
@@ -146,6 +148,16 @@ async fn refresh_products(
 #[tauri::command]
 fn get_settings(state: tauri::State<'_, AppState>) -> Settings {
     state.settings_snapshot()
+}
+
+#[tauri::command]
+fn get_bridge_pairing_code(bridge: tauri::State<'_, PaymentBridge>) -> Result<String, String> {
+    bridge.pairing_code().map(str::to_string)
+}
+
+#[tauri::command]
+fn get_payment_link(bridge: tauri::State<'_, PaymentBridge>) -> Option<PaymentLink> {
+    bridge.latest()
 }
 
 #[tauri::command]
@@ -450,7 +462,7 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
                 &target.locale,
                 settings
                     .auto_add_to_bag
-                    .then_some(target.part_number.as_str()),
+                    .then_some((target.part_number.as_str(), target.store_number.as_str())),
                 |url| app.opener().open_url(url, None::<&str>),
             ) {
                 let _ = app.emit(NOTICE_CHANNEL, format!("打开购买页面失败：{err}"));
@@ -607,6 +619,16 @@ pub fn run() {
                 });
             }
 
+            let handle: AppHandle = app.handle().clone();
+            let (bridge, bridge_listener) = match payment_bridge::prepare(&handle) {
+                Ok((bridge, listener)) => (bridge, Some(listener)),
+                Err(err) => {
+                    notices.push(format!("付款链接桥接不可用：{err}"));
+                    (PaymentBridge::disabled(), None)
+                }
+            };
+            app.manage(bridge);
+
             app.manage(AppState {
                 watcher,
                 client,
@@ -616,7 +638,9 @@ pub fn run() {
                 store,
             });
 
-            let handle: AppHandle = app.handle().clone();
+            if let Some(listener) = bridge_listener {
+                tauri::async_runtime::spawn(payment_bridge::serve(handle.clone(), listener));
+            }
             tauri::async_runtime::spawn(pump_events(handle.clone(), events));
 
             if let Err(err) = setup_tray(&handle) {
@@ -651,6 +675,8 @@ pub fn run() {
             list_products,
             refresh_products,
             get_settings,
+            get_bridge_pairing_code,
+            get_payment_link,
             open_extension_folder,
             save_settings,
             set_push_urls,

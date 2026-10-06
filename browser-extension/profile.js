@@ -1,4 +1,5 @@
 const STORAGE_KEY = 'apwCheckoutProfile';
+const BRIDGE_KEY = 'apwBridgeToken';
 const FIELDS = {
   pickup: ['familyName', 'givenName', 'fullName', 'phone', 'email'],
   delivery: [
@@ -10,8 +11,9 @@ const FIELDS = {
 const form = document.getElementById('profile-form');
 const status = document.getElementById('status');
 
-chrome.storage.local.get(STORAGE_KEY).then((result) => {
+chrome.storage.local.get([STORAGE_KEY, BRIDGE_KEY]).then((result) => {
   const saved = result[STORAGE_KEY];
+  form.elements.namedItem('bridgeToken').value = result[BRIDGE_KEY] || '';
   if (!saved) return;
   form.elements.namedItem('enabled').checked = saved.enabled !== false;
   for (const [section, keys] of Object.entries(FIELDS)) {
@@ -31,7 +33,10 @@ form.addEventListener('submit', async (event) => {
     }
   }
   try {
-    await chrome.storage.local.set({ [STORAGE_KEY]: saved });
+    await chrome.storage.local.set({
+      [STORAGE_KEY]: saved,
+      [BRIDGE_KEY]: form.elements.namedItem('bridgeToken').value.trim(),
+    });
     status.textContent = '已保存。';
   } catch {
     status.textContent = '保存失败，请重试。';
@@ -39,11 +44,11 @@ form.addEventListener('submit', async (event) => {
 });
 
 document.getElementById('clear-profile').addEventListener('click', async () => {
-  if (!confirm('删除此 Chrome 用户配置文件中保存的取货和配送资料？')) return;
+  if (!confirm('删除此 Chrome 用户配置文件中保存的取货、配送资料和扩展连接码？')) return;
   try {
-    await chrome.storage.local.remove(STORAGE_KEY);
+    await chrome.storage.local.remove([STORAGE_KEY, BRIDGE_KEY]);
     form.reset();
-    status.textContent = '已删除。';
+    status.textContent = '资料和连接码已删除。';
   } catch {
     status.textContent = '删除失败，请重试。';
   }
