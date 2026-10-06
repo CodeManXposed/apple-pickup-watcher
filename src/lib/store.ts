@@ -17,6 +17,7 @@ import type {
   Category,
   CategoryOption,
   Product,
+  PaymentLink,
   Region,
   Settings,
   Store,
@@ -30,6 +31,7 @@ import { assertNever, describeAvailability, isUntrusted } from "./types";
 
 const EVENT_CHANNEL = "watcher://event";
 const NOTICE_CHANNEL = "watcher://notice";
+const PAYMENT_CHANNEL = "watcher://payment-link";
 const MAX_LOG_LINES = 300;
 
 export interface UiState {
@@ -43,6 +45,7 @@ export interface UiState {
    */
   pacing: { nextCheckInSecs: number; paced: boolean } | null;
   logs: string[];
+  paymentLink: PaymentLink | null;
   regions: Region[];
   categories: CategoryOption[];
   stores: Store[];
@@ -84,6 +87,7 @@ let state: UiState = {
   trouble: null,
   pacing: null,
   logs: [],
+  paymentLink: null,
   regions: [],
   categories: [],
   stores: [],
@@ -184,6 +188,7 @@ function applyEvent(event: WatcherEvent): void {
 
 let unlisteners: UnlistenFn[] = [];
 let starting: Promise<void> | null = null;
+let paymentEventSerial = 0;
 
 /**
  * 连接后端。重复调用是安全的。
@@ -199,16 +204,27 @@ export function connect(): Promise<void> {
       listen<WatcherEvent>(EVENT_CHANNEL, (e) => applyEvent(e.payload)),
       // 这条通道不只在启动时用：发提醒失败、打开购物袋失败也走这里，前缀不能写死成「启动」。
       listen<string>(NOTICE_CHANNEL, (e) => pushLog(`提示：${e.payload}`)),
+      listen<PaymentLink>(PAYMENT_CHANNEL, (e) => {
+        paymentEventSerial += 1;
+        update({ paymentLink: e.payload });
+        pushLog("已收到支付宝付款链接，请核对商家与金额。");
+      }),
     ]);
 
-    const [regions, categories, settings, rows, running] = await Promise.all([
+    const serialAtLoad = paymentEventSerial;
+    const [regions, categories, settings, rows, running, paymentLink] = await Promise.all([
       invoke<Region[]>("list_regions"),
       invoke<CategoryOption[]>("list_categories"),
       invoke<Settings>("get_settings"),
       invoke<TargetState[]>("get_snapshot"),
       invoke<boolean>("is_running"),
+      invoke<PaymentLink | null>("get_payment_link"),
     ]);
-    update({ regions, categories, settings, rows, running, ready: true });
+    update({
+      regions, categories, settings, rows, running,
+      paymentLink: paymentEventSerial === serialAtLoad ? paymentLink : state.paymentLink,
+      ready: true,
+    });
     await loadCatalog(settings.locale);
     // 启动时静默查一次。查不到就算了，不打扰用户 —— 网络不通、GitHub 抽风
     // 都会走到这里，跟「有没有新版本」是两回事。
@@ -361,6 +377,25 @@ export async function openExtensionFolder(): Promise<void> {
     await invoke("open_extension_folder");
   } catch (err) {
     pushLog(`打开 Chrome 扩展目录失败：${String(err)}`);
+  }
+}
+
+export async function copyBridgePairingCode(): Promise<void> {
+  try {
+    const code = await invoke<string>("get_bridge_pairing_code");
+    await navigator.clipboard.writeText(code);
+    pushLog("已复制扩展连接码，请粘贴到 Chrome 扩展的结账资料设置中。");
+  } catch (err) {
+    pushLog(`复制扩展连接码失败：${String(err)}`);
+  }
+}
+
+export async function copyPaymentLink(url: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(url);
+    pushLog("已复制支付宝付款链接。");
+  } catch (err) {
+    pushLog(`复制付款链接失败：${String(err)}`);
   }
 }
 

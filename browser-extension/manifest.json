@@ -1,9 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Apple Pickup Watcher",
-  "version": "0.2.0",
-  "description": "自动加车，并在 Apple 结账页填充本机保存的取货及配送资料。",
+  "version": "0.3.0",
+  "description": "自动加车、进入结账，并填充本机保存的取货及配送资料。",
   "permissions": ["storage"],
+  "host_permissions": ["http://127.0.0.1:43849/*"],
+  "background": { "service_worker": "background.js" },
   "action": {
     "default_title": "Apple 结账资料",
     "default_popup": "popup.html"
@@ -25,11 +27,37 @@
         "https://www.apple.com/shop/*",
         "https://www.apple.com/*/shop/*",
         "https://www.apple.com.cn/shop/*",
+        "https://*.www.apple.com/shop/*",
+        "https://*.www.apple.com/*/shop/*",
+        "https://*.www.apple.com.cn/shop/*",
         "https://*.store.apple.com/shop/*",
+        "https://*.store.apple.com/*/shop/*",
         "https://*.store.apple.com.cn/shop/*"
       ],
       "js": ["profile-fill.js"],
       "run_at": "document_idle",
+      "world": "ISOLATED"
+    },
+    {
+      "matches": [
+        "https://www.apple.com/shop/*",
+        "https://www.apple.com/*/shop/*",
+        "https://www.apple.com.cn/shop/*",
+        "https://*.www.apple.com/shop/*",
+        "https://*.www.apple.com/*/shop/*",
+        "https://*.www.apple.com.cn/shop/*",
+        "https://*.store.apple.com/*",
+        "https://*.store.apple.com.cn/*"
+      ],
+      "js": ["checkout-flow.js"],
+      "run_at": "document_idle",
+      "world": "ISOLATED"
+    },
+    {
+      "matches": ["https://*.alipay.com/*"],
+      "js": ["alipay-capture.js"],
+      "run_at": "document_idle",
+      "all_frames": true,
       "world": "ISOLATED"
     }
   ]

@@ -20,7 +20,7 @@ impl AutoOpenBag {
         &mut self,
         enabled: bool,
         locale: &str,
-        auto_add_part: Option<&str>,
+        auto_add_target: Option<(&str, &str)>,
         open: impl FnOnce(&str) -> Result<(), E>,
     ) -> Result<(), E> {
         if !enabled || self.opened_this_run {
@@ -32,10 +32,15 @@ impl AutoOpenBag {
 
         // 整个会话使用首个有效命中的地区。其他地区仍逐项提醒，但不再导航浏览器。
         // 打开失败不消耗这次机会，之后的到货事件可以重试。
-        let url = match auto_add_part {
-            Some(part) => match region.auto_add_url(part) {
-                Some(url) => url,
-                None => return Ok(()),
+        let url = match auto_add_target {
+            Some((part, store)) => match region.auto_add_url(part) {
+                Some(url)
+                    if (2..=10).contains(&store.len())
+                        && store.bytes().all(|c| c.is_ascii_alphanumeric()) =>
+                {
+                    format!("{url}&apw-store={store}")
+                }
+                _ => return Ok(()),
             },
             None => region.bag_url(),
         };
@@ -124,7 +129,7 @@ mod tests {
         gate.on_run_state_changed(true);
         let mut opened = Vec::new();
         for part in ["MJYE4CH/A", "MJYA4CH/A"] {
-            gate.open_if_needed(true, "zh_CN", Some(part), |url| {
+            gate.open_if_needed(true, "zh_CN", Some((part, "R683")), |url| {
                 opened.push(url.to_owned());
                 Ok::<_, ()>(())
             })
@@ -132,7 +137,9 @@ mod tests {
         }
         assert_eq!(
             opened,
-            vec!["https://www.apple.com.cn/shop/pdpAddToBag/MJYE4CH/A#apw-auto-add=MJYE4CH%2FA"]
+            vec![
+                "https://www.apple.com.cn/shop/pdpAddToBag/MJYE4CH/A#apw-auto-add=MJYE4CH%2FA&apw-store=R683"
+            ]
         );
     }
 
@@ -140,12 +147,12 @@ mod tests {
     fn 无效零件号不消耗自动加车机会() {
         let mut gate = AutoOpenBag::default();
         gate.on_run_state_changed(true);
-        gate.open_if_needed(true, "zh_CN", Some("../bag"), |_| {
+        gate.open_if_needed(true, "zh_CN", Some(("../bag", "R683")), |_| {
             panic!("无效零件号不应打开页面")
         })
         .unwrap_or_else(|_: ()| unreachable!());
         let mut opened = false;
-        gate.open_if_needed(true, "zh_CN", Some("MJYE4CH/A"), |_| {
+        gate.open_if_needed(true, "zh_CN", Some(("MJYE4CH/A", "R683")), |_| {
             opened = true;
             Ok::<_, ()>(())
         })

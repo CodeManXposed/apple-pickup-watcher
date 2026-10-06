@@ -35,21 +35,25 @@ function page(hash, store) {
 test('only marked Apple product pages add the target once and open that bag', async () => {
   const calls = [];
   const store = { isDisabled: false, async addItem(part, qty) { calls.push([part, qty]); } };
-  const p = page('#apw-auto-add=MJYE4CH%2FA', store);
+  const p = page('#apw-auto-add=MJYE4CH%2FA&apw-store=R683', store);
   assert.equal(p.history.replaced, '/shop/buy-iphone/iphone-18-pro/mjye4ch/a');
   await p.tick();
   assert.deepEqual(calls, [['MJYE4CH/A', 1]]);
-  assert.equal(p.location.assigned, 'https://www.apple.com.cn/shop/bag');
+  assert.equal(p.location.assigned, 'https://www.apple.com.cn/shop/bag#apw-checkout=1&apw-store=R683');
   assert.equal(p.cleared, true);
 
   const unmarked = page('', store);
   await unmarked.tick();
   assert.equal(unmarked.history.replaced, undefined);
   assert.deepEqual(calls, [['MJYE4CH/A', 1]]);
+  const invalidStore = page('#apw-auto-add=MJYE4CH%2FA&apw-store=%3Cbad%3E', store);
+  await invalidStore.tick();
+  assert.equal(invalidStore.location.assigned, undefined);
+  assert.deepEqual(calls, [['MJYE4CH/A', 1]]);
 });
 
 test('Apple rejection leaves the product page open and reports failure', async () => {
-  const p = page('#apw-auto-add=MJYE4CH%2FA', {
+  const p = page('#apw-auto-add=MJYE4CH%2FA&apw-store=R683', {
     isDisabled: false,
     async addItem() { throw new Error('out of stock'); },
   });

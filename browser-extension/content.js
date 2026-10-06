@@ -5,7 +5,9 @@
 
   const params = new URLSearchParams(location.hash.slice(1));
   const part = params.get('apw-auto-add');
+  const storeNumber = params.get('apw-store');
   if (!part || !/^[A-Z0-9]{4,20}\/[A-Z]$/.test(part)) return;
+  if (!storeNumber || !/^[A-Z0-9]{2,10}$/.test(storeNumber)) return;
 
   // 先移除片段，避免刷新或从购买页返回时再次加车。
   history.replaceState(history.state, '', location.pathname + location.search);
@@ -43,9 +45,10 @@
     clearInterval(timer);
     try {
       await store.addItem(part, 1);
-      notice('已加入购物袋，正在打开购物袋…');
+      notice('已加入购物袋，正在进入结账…');
       const prefix = location.pathname.split('/shop/')[0];
-      location.assign(`${location.origin}${prefix}/shop/bag`);
+      // 片段不发送到 Apple；购物袋页的隔离脚本消费标记后点击官方结账按钮。
+      location.assign(`${location.origin}${prefix}/shop/bag#apw-checkout=1&apw-store=${storeNumber}`);
     } catch (error) {
       const detail = error && error.message ? `：${String(error.message).slice(0, 140)}` : '';
       notice(`自动加车失败${detail}。请在当前页面手动添加。`, true);
