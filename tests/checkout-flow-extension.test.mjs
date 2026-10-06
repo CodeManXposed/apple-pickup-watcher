@@ -153,7 +153,7 @@ test('contact step waits for profile fill and required fields before continuing'
   required.type = 'email';
   const selectors = {
     '.rs-pickup-button button': [continueButton],
-    'input[required], textarea[required], select[required], [aria-required="true"]': [required],
+    'input[required], textarea[required], select[required], input[aria-required="true"], textarea[aria-required="true"], select[aria-required="true"]': [required],
     'input, textarea, select': [required],
     '[role="dialog"]': [],
   };

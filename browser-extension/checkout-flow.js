@@ -89,7 +89,7 @@
       notice('请先在扩展中保存并启用结账资料，或在 Apple 页面手动继续。');
       return false;
     }
-    const required = Array.from(document.querySelectorAll('input[required], textarea[required], select[required], [aria-required="true"]'))
+    const required = Array.from(document.querySelectorAll('input[required], textarea[required], select[required], input[aria-required="true"], textarea[aria-required="true"], select[aria-required="true"]'))
       .filter(visible);
     const missing = required.some((field) => {
       if (field.type === 'checkbox') return !field.checked;
