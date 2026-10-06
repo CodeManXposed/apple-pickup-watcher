@@ -153,6 +153,8 @@ pub struct Settings {
     pub sound_enabled: bool,
     /// 有货时是否自动打开购物袋页面。
     pub open_bag_on_hit: bool,
+    /// 有货时打开商品页，让配套浏览器扩展尝试把首个命中的型号加入购物袋。
+    pub auto_add_to_bag: bool,
     /// 代理地址列表，可空。每个代理是一条额外的出口线路，和直连轮流使用、被拦时
     /// 切换（见 [`crate::apple::ClientConfig::proxies`]）。只保留能解析、协议为
     /// http / https / socks5 / socks5h 的地址。
@@ -177,6 +179,7 @@ impl Default for Settings {
             discord_webhook: String::new(),
             sound_enabled: true,
             open_bag_on_hit: true,
+            auto_add_to_bag: false,
             proxies: Vec::new(),
         }
     }
@@ -712,6 +715,7 @@ impl LegacySettings {
             discord_webhook: String::new(),
             sound_enabled: self.sound_enabled.unwrap_or(fallback.sound_enabled),
             open_bag_on_hit: self.open_bag_on_hit.unwrap_or(fallback.open_bag_on_hit),
+            auto_add_to_bag: false,
             // Go 版没有代理设置，迁移过来的文件一律从空开始。
             proxies: fallback.proxies,
         };
@@ -747,6 +751,7 @@ mod tests {
         assert_eq!(s.interval_seconds, DEFAULT_INTERVAL_SECONDS);
         assert!(s.sound_enabled);
         assert!(s.open_bag_on_hit);
+        assert!(!s.auto_add_to_bag);
         assert!(region_by_locale(&s.locale).is_some());
     }
 

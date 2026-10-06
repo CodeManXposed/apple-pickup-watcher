@@ -56,6 +56,7 @@ import {
   connect,
   dismissUpdate,
   installUpdate,
+  openExtensionFolder,
   refreshProducts,
   saveSettings,
   setCategory,
@@ -184,7 +185,9 @@ function settingsSummary(s: Settings): string {
     pushSummary(savedPushAddresses(s)),
     (s.proxies ?? []).length > 0 ? `代理 ${s.proxies.length} 条` : "无代理",
     s.soundEnabled ? "提示音开" : "提示音关",
-    s.openBagOnHit ? "有货时开购物袋" : "有货时不开购物袋",
+    s.autoAddToBag
+      ? "有货时自动加车"
+      : s.openBagOnHit ? "有货时开购物袋" : "有货时不开购物袋",
   ].join(" · ");
 }
 
@@ -768,11 +771,28 @@ export default function App() {
                   <Switch
                     id="openbag"
                     checked={ui.settings.openBagOnHit}
+                    disabled={ui.settings.autoAddToBag}
                     onCheckedChange={(v) =>
                       void saveSettings({ ...ui.settings, openBagOnHit: v })
                     }
                   />
                   <Label htmlFor="openbag">有货时打开购物袋</Label>
+                </div>
+                <div className="flex w-full flex-wrap items-center gap-2">
+                  <Switch
+                    id="autoadd"
+                    checked={ui.settings.autoAddToBag}
+                    onCheckedChange={(v) =>
+                      void saveSettings({ ...ui.settings, autoAddToBag: v })
+                    }
+                  />
+                  <Label htmlFor="autoadd">有货时自动加车</Label>
+                  <span className="text-muted-foreground text-xs">
+                    需在 Chrome 扩展程序中开启开发者模式并加载配套扩展
+                  </span>
+                  <Button variant="outline" size="sm" onClick={() => void openExtensionFolder()}>
+                    打开扩展目录
+                  </Button>
                 </div>
               </div>
             </div>

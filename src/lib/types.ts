@@ -89,6 +89,8 @@ export interface Settings {
   discordWebhook: string;
   soundEnabled: boolean;
   openBagOnHit: boolean;
+  /** 使用配套 Chrome 扩展，在首个到货目标的商品页尝试加入购物袋。 */
+  autoAddToBag: boolean;
   /** 代理地址列表；每个代理是一条额外的出口线路，被拦时切换。可为空。 */
   proxies: string[];
 }

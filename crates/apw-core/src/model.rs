@@ -204,6 +204,29 @@ impl Region {
         format!("{}/shop/bag", self.base_url)
     }
 
+    /// Apple 会将这个入口重定向到指定零件号的商品页。
+    pub fn product_page_url(&self, part_number: &str) -> Option<String> {
+        let (part, revision) = part_number.split_once('/')?;
+        if part.len() < 4
+            || !part.bytes().all(|c| c.is_ascii_alphanumeric())
+            || revision.len() != 1
+            || !revision.bytes().all(|c| c.is_ascii_alphabetic())
+        {
+            return None;
+        }
+        let part_number = part_number.to_ascii_uppercase();
+        Some(format!("{}/shop/pdpAddToBag/{part_number}", self.base_url))
+    }
+
+    /// 片段只供配套浏览器扩展读取，不会发送给 Apple。
+    pub fn auto_add_url(&self, part_number: &str) -> Option<String> {
+        let product_url = self.product_page_url(part_number)?;
+        Some(format!(
+            "{product_url}#apw-auto-add={}",
+            part_number.to_ascii_uppercase().replace('/', "%2F")
+        ))
+    }
+
     /// 该地区的默认购买页：第一个 iPhone 购买页，没有 iPhone 页时取第一页，
     /// 连一页都没有才退回购物袋页。真实用户就是在购买页上触发取货查询的，
     /// 所以它用作取货请求的 Referer；诊断时也可以拿它做暖场对照。
@@ -530,6 +553,21 @@ impl std::fmt::Display for TargetKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 自动加车链接只接受合法零件号() {
+        let region = region_by_locale("zh_CN").unwrap();
+        assert_eq!(
+            region.auto_add_url("MJYE4CH/A"),
+            Some(
+                "https://www.apple.com.cn/shop/pdpAddToBag/MJYE4CH/A#apw-auto-add=MJYE4CH%2FA"
+                    .into()
+            )
+        );
+        for invalid in ["", "abc", "../../bag", "MJYE4CH/A?x=1", "MJYE4CH/A#x"] {
+            assert_eq!(region.auto_add_url(invalid), None);
+        }
+    }
 
     #[test]
     fn 未知状态必然带着原因() {

@@ -1,4 +1,4 @@
-//! 每次监控会话只自动打开一次购物袋，避免多个目标同时到货打断结账。
+//! 每次监控会话只自动打开一次购买入口，避免多个目标同时到货打断结账。
 
 use apw_core::model::region_by_locale;
 
@@ -20,6 +20,7 @@ impl AutoOpenBag {
         &mut self,
         enabled: bool,
         locale: &str,
+        auto_add_part: Option<&str>,
         open: impl FnOnce(&str) -> Result<(), E>,
     ) -> Result<(), E> {
         if !enabled || self.opened_this_run {
@@ -31,7 +32,14 @@ impl AutoOpenBag {
 
         // 整个会话使用首个有效命中的地区。其他地区仍逐项提醒，但不再导航浏览器。
         // 打开失败不消耗这次机会，之后的到货事件可以重试。
-        open(&region.bag_url())?;
+        let url = match auto_add_part {
+            Some(part) => match region.auto_add_url(part) {
+                Some(url) => url,
+                None => return Ok(()),
+            },
+            None => region.bag_url(),
+        };
+        open(&url)?;
         self.opened_this_run = true;
         Ok(())
     }
@@ -47,7 +55,7 @@ mod tests {
         gate.on_run_state_changed(true);
         let mut opened = Vec::new();
         for _ in 0..15 {
-            gate.open_if_needed(true, "zh_CN", |url| {
+            gate.open_if_needed(true, "zh_CN", None, |url| {
                 opened.push(url.to_owned());
                 Ok::<_, ()>(())
             })
@@ -56,7 +64,7 @@ mod tests {
         assert_eq!(opened, vec!["https://www.apple.com.cn/shop/bag"]);
 
         // 下一轮再次有货，或者另一个地区随后到货，都不打断当前购物袋。
-        gate.open_if_needed(true, "ja_JP", |_| panic!("同一会话不应再次打开"))
+        gate.open_if_needed(true, "ja_JP", None, |_| panic!("同一会话不应再次打开"))
             .unwrap_or_else(|_: ()| unreachable!());
     }
 
@@ -66,7 +74,7 @@ mod tests {
         let mut opened = Vec::new();
         for running in [true, false, true] {
             gate.on_run_state_changed(running);
-            gate.open_if_needed(true, "ja_JP", |url| {
+            gate.open_if_needed(true, "ja_JP", None, |url| {
                 opened.push(url.to_owned());
                 Ok::<_, ()>(())
             })
@@ -80,11 +88,11 @@ mod tests {
         let mut gate = AutoOpenBag::default();
         gate.on_run_state_changed(true);
         for (enabled, locale) in [(false, "zh_CN"), (true, "invalid")] {
-            gate.open_if_needed(enabled, locale, |_| panic!("不应打开购物袋"))
+            gate.open_if_needed(enabled, locale, None, |_| panic!("不应打开购物袋"))
                 .unwrap_or_else(|_: ()| unreachable!());
         }
         let mut opened = false;
-        gate.open_if_needed(true, "zh_CN", |_| {
+        gate.open_if_needed(true, "zh_CN", None, |_| {
             opened = true;
             Ok::<_, ()>(())
         })
@@ -97,16 +105,51 @@ mod tests {
         let mut gate = AutoOpenBag::default();
         gate.on_run_state_changed(true);
         assert_eq!(
-            gate.open_if_needed(true, "zh_CN", |_| Err("失败")),
+            gate.open_if_needed(true, "zh_CN", None, |_| Err("失败")),
             Err("失败")
         );
 
         let mut retried = false;
-        gate.open_if_needed(true, "zh_CN", |_| {
+        gate.open_if_needed(true, "zh_CN", None, |_| {
             retried = true;
             Ok::<_, ()>(())
         })
         .unwrap();
         assert!(retried);
+    }
+
+    #[test]
+    fn 自动加车只对首个命中目标打开商品页() {
+        let mut gate = AutoOpenBag::default();
+        gate.on_run_state_changed(true);
+        let mut opened = Vec::new();
+        for part in ["MJYE4CH/A", "MJYA4CH/A"] {
+            gate.open_if_needed(true, "zh_CN", Some(part), |url| {
+                opened.push(url.to_owned());
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            opened,
+            vec!["https://www.apple.com.cn/shop/pdpAddToBag/MJYE4CH/A#apw-auto-add=MJYE4CH%2FA"]
+        );
+    }
+
+    #[test]
+    fn 无效零件号不消耗自动加车机会() {
+        let mut gate = AutoOpenBag::default();
+        gate.on_run_state_changed(true);
+        gate.open_if_needed(true, "zh_CN", Some("../bag"), |_| {
+            panic!("无效零件号不应打开页面")
+        })
+        .unwrap_or_else(|_: ()| unreachable!());
+        let mut opened = false;
+        gate.open_if_needed(true, "zh_CN", Some("MJYE4CH/A"), |_| {
+            opened = true;
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        assert!(opened);
     }
 }

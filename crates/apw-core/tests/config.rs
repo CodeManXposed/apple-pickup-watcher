@@ -91,6 +91,7 @@ fn 样例设置() -> Settings {
         discord_webhook: "https://discord.com/api/webhooks/123/token".into(),
         sound_enabled: false,
         open_bag_on_hit: true,
+        auto_add_to_bag: false,
         proxies: Vec::new(),
     }
 }
@@ -515,12 +516,13 @@ fn 设置的线上格式是小驼峰() {
         "discordWebhook",
         "soundEnabled",
         "openBagOnHit",
+        "autoAddToBag",
         "proxies",
     ] {
         assert!(obj.contains_key(key), "缺少字段 {key}：{value}");
     }
     assert!(!obj.contains_key("interval_seconds"), "不该有蛇形字段");
-    assert_eq!(obj.len(), 9);
+    assert_eq!(obj.len(), 10);
 }
 
 #[test]

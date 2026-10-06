@@ -149,6 +149,20 @@ fn get_settings(state: tauri::State<'_, AppState>) -> Settings {
 }
 
 #[tauri::command]
+fn open_extension_folder(app: AppHandle) -> Result<(), String> {
+    use tauri::path::BaseDirectory;
+    use tauri_plugin_opener::OpenerExt;
+
+    let path = app
+        .path()
+        .resolve("browser-extension", BaseDirectory::Resource)
+        .map_err(|e| e.to_string())?;
+    app.opener()
+        .open_path(path.to_string_lossy().into_owned(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn save_settings(
     state: tauri::State<'_, AppState>,
     settings: Settings,
@@ -407,23 +421,39 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
                 "有货了",
                 format!("{} {}", target.store_title, target.product_name),
             );
-            let notification = match region_by_locale(&target.locale) {
-                Some(region) => notification.with_url(region.bag_url()),
-                None => notification,
-            };
-
             let settings = app
                 .try_state::<AppState>()
                 .map(|s| s.settings_snapshot())
                 .unwrap_or_default();
 
-            use tauri_plugin_opener::OpenerExt;
-            if let Err(err) =
-                auto_open_bag.open_if_needed(settings.open_bag_on_hit, &target.locale, |url| {
-                    app.opener().open_url(url, None::<&str>)
-                })
+            let notification = match region_by_locale(&target.locale) {
+                Some(region) if settings.auto_add_to_bag => notification.with_url(
+                    region
+                        .product_page_url(&target.part_number)
+                        .unwrap_or_else(|| region.bag_url()),
+                ),
+                Some(region) => notification.with_url(region.bag_url()),
+                None => notification,
+            };
+
+            if settings.auto_add_to_bag
+                && region_by_locale(&target.locale)
+                    .and_then(|r| r.auto_add_url(&target.part_number))
+                    .is_none()
             {
-                let _ = app.emit(NOTICE_CHANNEL, format!("打开购物袋失败：{err}"));
+                let _ = app.emit(NOTICE_CHANNEL, "零件号无效，已跳过该目标的自动加车");
+            }
+
+            use tauri_plugin_opener::OpenerExt;
+            if let Err(err) = auto_open_bag.open_if_needed(
+                settings.open_bag_on_hit || settings.auto_add_to_bag,
+                &target.locale,
+                settings
+                    .auto_add_to_bag
+                    .then_some(target.part_number.as_str()),
+                |url| app.opener().open_url(url, None::<&str>),
+            ) {
+                let _ = app.emit(NOTICE_CHANNEL, format!("打开购买页面失败：{err}"));
             }
 
             // 不逐项等待网络推送，否则15个Bark超时会让快照和暂停状态迟到150秒。
@@ -621,6 +651,7 @@ pub fn run() {
             list_products,
             refresh_products,
             get_settings,
+            open_extension_folder,
             save_settings,
             set_push_urls,
             get_snapshot,

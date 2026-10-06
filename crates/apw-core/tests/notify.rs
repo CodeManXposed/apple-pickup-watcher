@@ -78,10 +78,10 @@ impl TestServer {
                             Ok(0) => break,
                             Ok(_) if header.trim().is_empty() => break,
                             Ok(_) => {
-                                if let Some((name, value)) = header.split_once(':') {
-                                    if name.eq_ignore_ascii_case("content-length") {
-                                        content_length = value.trim().parse().unwrap_or(0);
-                                    }
+                                if let Some((name, value)) = header.split_once(':')
+                                    && name.eq_ignore_ascii_case("content-length")
+                                {
+                                    content_length = value.trim().parse().unwrap_or(0);
                                 }
                             }
                             Err(_) => break,
