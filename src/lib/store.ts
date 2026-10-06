@@ -74,6 +74,7 @@ const DEFAULT_SETTINGS: Settings = {
   discordWebhook: "",
   soundEnabled: true,
   openBagOnHit: true,
+  autoAddToBag: false,
   proxies: [],
 };
 
@@ -352,6 +353,14 @@ export async function testNotify(): Promise<void> {
     pushLog("已发出测试提醒。");
   } catch (err) {
     pushLog(`测试提醒失败：${String(err)}`);
+  }
+}
+
+export async function openExtensionFolder(): Promise<void> {
+  try {
+    await invoke("open_extension_folder");
+  } catch (err) {
+    pushLog(`打开 Chrome 扩展目录失败：${String(err)}`);
   }
 }
 
