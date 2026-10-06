@@ -16,10 +16,11 @@ function button(label, group = null) {
   };
 }
 
-async function page({ pathname, hash = '', official = [], candidates = [], phase = null, selectors = {} }) {
+async function page({ pathname, hash = '', official = [], candidates = [], phase = null, selectors = {}, profileReady = false }) {
   const location = { pathname, search: '', hash, origin: 'https://www.apple.com.cn' };
   const history = { state: null, replaceState(_state, _title, url) { this.url = url; } };
   const notices = new Map();
+  const attributes = new Map();
   let currentPhase = phase;
   let clickHandler;
   const chrome = {
@@ -32,7 +33,10 @@ async function page({ pathname, hash = '', official = [], candidates = [], phase
     },
   };
   const document = {
-    documentElement: {},
+    documentElement: {
+      getAttribute(key) { return attributes.get(key) ?? null; },
+      setAttribute(key, value) { attributes.set(key, value); },
+    },
     body: { appendChild(node) { notices.set(node.id, node); } },
     getElementById(id) { return notices.get(id) || null; },
     createElement() { return { style: {}, setAttribute() {}, textContent: '' }; },
@@ -45,8 +49,14 @@ async function page({ pathname, hash = '', official = [], candidates = [], phase
   };
   const window = {};
   window.top = window;
+  window.dispatchEvent = (event) => {
+    if (profileReady && event.type === 'apw-request-profile-fill') {
+      attributes.set('data-apw-profile-fill-ready', '1');
+    }
+  };
   vm.runInNewContext(script, {
     window, location, history, document, chrome, URLSearchParams, URL, Date,
+    Event: class { constructor(type) { this.type = type; } },
     MutationObserver: class { observe() {} },
     setTimeout() { return 1; },
   });
@@ -133,6 +143,27 @@ test('pickup fulfillment selects only the monitored store before continuing', as
   target.checked = true;
   await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
   assert.equal(fulfillment.clicks, 1);
+});
+
+test('contact step waits for profile fill and required fields before continuing', async () => {
+  const continueButton = button('继续');
+  const required = button('');
+  required.name = 'pickupEmail';
+  required.value = '';
+  required.type = 'email';
+  const selectors = {
+    '.rs-pickup-button button': [continueButton],
+    'input[required], textarea[required], select[required], [aria-required="true"]': [required],
+    'input, textarea, select': [required],
+    '[role="dialog"]': [],
+  };
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
+  assert.equal(continueButton.clicks, 0);
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors, profileReady: true });
+  assert.equal(continueButton.clicks, 0);
+  required.value = 'pickup@example.test';
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors, profileReady: true });
+  assert.equal(continueButton.clicks, 1);
 });
 
 test('privacy consent and a missing monitored store stop automatic checkout', async () => {

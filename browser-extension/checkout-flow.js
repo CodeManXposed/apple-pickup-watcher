@@ -14,6 +14,7 @@
   const clickedSteps = new Set();
   let orderNoted = false;
   let begun = false;
+  const requestedContacts = new WeakSet();
   const startedAt = Date.now();
 
   function visible(element) {
@@ -78,6 +79,35 @@
     return true;
   }
 
+  function contactReady(button) {
+    if (!requestedContacts.has(button)) {
+      requestedContacts.add(button);
+      document.documentElement.setAttribute('data-apw-profile-fill-ready', 'pending');
+      window.dispatchEvent(new Event('apw-request-profile-fill'));
+    }
+    if (document.documentElement.getAttribute('data-apw-profile-fill-ready') !== '1') {
+      notice('请先在扩展中保存并启用结账资料，或在 Apple 页面手动继续。');
+      return false;
+    }
+    const required = Array.from(document.querySelectorAll('input[required], textarea[required], select[required], [aria-required="true"]'))
+      .filter(visible);
+    const missing = required.some((field) => {
+      if (field.type === 'checkbox') return !field.checked;
+      if (field.type === 'radio') {
+        return !Array.from(document.querySelectorAll('input[type="radio"]'))
+          .some((radio) => radio.name === field.name && radio.checked);
+      }
+      return !String(field.value || '').trim();
+    });
+    if (missing) notice('结账资料仍有必填项未完成，请在 Apple 页面补全。');
+    return !missing;
+  }
+
+  function contactFingerprint() {
+    return Array.from(document.querySelectorAll('input, textarea, select'))
+      .filter(visible).map((field) => `${field.name}:${field.value}:${field.checked}`).join('|');
+  }
+
   function selectedPickupStore(number) {
     const candidates = Array.from(document.querySelectorAll('input[type="radio"].form-selector-input'));
     return candidates.find((input) => input.value === number && visible(input));
@@ -119,12 +149,12 @@
     }
     const pickupContinue = document.querySelector('.rs-pickup-button button');
     if (pickupContinue) {
-      clickOnce('pickup-contact', pickupContinue, '正在继续到付款方式…');
+      if (contactReady(pickupContinue)) clickOnce(`pickup-contact:${contactFingerprint()}`, pickupContinue, '正在继续到付款方式…');
       return;
     }
     const shippingContinue = document.querySelector('[data-autom="shipping-continue-button"]');
     if (shippingContinue) {
-      clickOnce('shipping', shippingContinue, '正在继续到付款方式…');
+      if (contactReady(shippingContinue)) clickOnce(`shipping:${contactFingerprint()}`, shippingContinue, '正在继续到付款方式…');
       return;
     }
     const paymentContinue = document.querySelector('[data-autom="continue-button-review"]');
@@ -188,6 +218,7 @@
         const updated = await chrome.runtime.sendMessage({ type: 'apw-checkout-step', phase: 'guest-clicked' });
         if (!updated) return;
         done = true;
+        notice('正在以访客身份结账；若 Apple 显示隐私同意书，请自行阅读并决定。');
         button.click();
       }
       return;
@@ -211,7 +242,12 @@
     }
     await act();
     if (done) return;
-    new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true });
+    new MutationObserver(schedule).observe(document.documentElement, {
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: ['data-apw-profile-fill-ready'],
+    });
+    document.addEventListener('input', schedule);
+    document.addEventListener('change', schedule);
     if (markedBag) setTimeout(schedule, 30000);
   }
   void start();
