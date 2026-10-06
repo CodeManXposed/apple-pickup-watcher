@@ -17,9 +17,16 @@
   const requestedContacts = new WeakSet();
   const startedAt = Date.now();
 
+  function shown(element) {
+    return !element.closest('[aria-hidden="true"]') && element.getClientRects().length > 0;
+  }
+
   function visible(element) {
-    return !element.disabled && element.getAttribute('aria-disabled') !== 'true' &&
-      !element.closest('[aria-hidden="true"]') && element.getClientRects().length > 0;
+    return !element.disabled && element.getAttribute('aria-disabled') !== 'true' && shown(element);
+  }
+
+  function firstShown(selector) {
+    return Array.from(document.querySelectorAll(selector)).find(shown);
   }
 
   function notice(message, failed = false) {
@@ -133,7 +140,7 @@
       notice('请先在 Apple 页面自行阅读并处理隐私同意书。');
       return;
     }
-    const fulfillment = document.querySelector('[data-autom="fulfillment-continue-button"]');
+    const fulfillment = firstShown('[data-autom="fulfillment-continue-button"]');
     if (fulfillment) {
       const store = selectedPickupStore(flow.storeNumber);
       if (!store) {
@@ -147,17 +154,17 @@
       clickOnce('fulfillment', fulfillment, '正在继续到取货资料…');
       return;
     }
-    const pickupContinue = document.querySelector('.rs-pickup-button button');
+    const pickupContinue = firstShown('.rs-pickup-button button');
     if (pickupContinue) {
       if (contactReady(pickupContinue)) clickOnce(`pickup-contact:${contactFingerprint()}`, pickupContinue, '正在继续到付款方式…');
       return;
     }
-    const shippingContinue = document.querySelector('[data-autom="shipping-continue-button"]');
+    const shippingContinue = firstShown('[data-autom="shipping-continue-button"]');
     if (shippingContinue) {
       if (contactReady(shippingContinue)) clickOnce(`shipping:${contactFingerprint()}`, shippingContinue, '正在继续到付款方式…');
       return;
     }
-    const paymentContinue = document.querySelector('[data-autom="continue-button-review"]');
+    const paymentContinue = firstShown('[data-autom="continue-button-review"]');
     if (paymentContinue) {
       const alipay = alipayRadio();
       if (!alipay) {
@@ -171,7 +178,7 @@
       clickOnce('billing', paymentContinue, '正在进入确认订单页…');
       return;
     }
-    const placeOrder = document.querySelector('[data-autom="continue-button-placeOrder"]');
+    const placeOrder = firstShown('[data-autom="continue-button-placeOrder"]');
     if (placeOrder) notice('请核对商品、门店、金额及资料；点击“现在下订单”后 Apple 才会跳转支付宝。');
   }
 
@@ -242,9 +249,11 @@
     }
     await act();
     if (done) return;
-    new MutationObserver(schedule).observe(document.documentElement, {
+    new MutationObserver((records) => {
+      if (records.some((record) => !record.target.closest?.('#apw-checkout-notice'))) schedule();
+    }).observe(document.documentElement, {
       childList: true, subtree: true, attributes: true,
-      attributeFilter: ['data-apw-profile-fill-ready'],
+      attributeFilter: ['class', 'style', 'hidden', 'aria-hidden', 'disabled', 'aria-disabled', 'data-apw-profile-fill-ready'],
     });
     document.addEventListener('input', schedule);
     document.addEventListener('change', schedule);

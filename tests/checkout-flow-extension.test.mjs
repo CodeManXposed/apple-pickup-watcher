@@ -10,7 +10,7 @@ function button(label, group = null) {
   return {
     textContent: label, disabled: false, clicks: 0, style: {},
     getAttribute(key) { return key === 'aria-label' ? null : null; },
-    getClientRects() { return [1]; },
+    getClientRects() { return this.hidden ? [] : [1]; },
     closest(selector) { return selector === '.rs-bag-checkout-mainbutton' ? group : null; },
     click() { this.clicks++; },
   };
@@ -164,6 +164,27 @@ test('contact step waits for profile fill and required fields before continuing'
   required.value = 'pickup@example.test';
   await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors, profileReady: true });
   assert.equal(continueButton.clicks, 1);
+});
+
+test('hidden buttons from earlier checkout steps do not block the visible contact step', async () => {
+  const oldFulfillment = button('继续');
+  oldFulfillment.hidden = true;
+  const pickupContinue = button('继续');
+  const email = button('');
+  email.name = 'pickupEmail';
+  email.value = 'pickup@example.test';
+  email.type = 'email';
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', profileReady: true,
+    selectors: {
+      '[data-autom="fulfillment-continue-button"]': [oldFulfillment],
+      '.rs-pickup-button button': [pickupContinue],
+      'input[required], textarea[required], select[required], input[aria-required="true"], textarea[aria-required="true"], select[aria-required="true"]': [email],
+      'input, textarea, select': [email],
+      '[role="dialog"]': [],
+    },
+  });
+  assert.equal(oldFulfillment.clicks, 0);
+  assert.equal(pickupContinue.clicks, 1);
 });
 
 test('privacy consent and a missing monitored store stop automatic checkout', async () => {
