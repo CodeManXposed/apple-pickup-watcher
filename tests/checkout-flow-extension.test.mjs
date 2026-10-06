@@ -21,6 +21,7 @@ async function page({ pathname, hash = '', official = [], candidates = [], phase
   const history = { state: null, replaceState(_state, _title, url) { this.url = url; } };
   const notices = new Map();
   let currentPhase = phase;
+  let clickHandler;
   const chrome = {
     runtime: {
       async sendMessage(message) {
@@ -40,6 +41,7 @@ async function page({ pathname, hash = '', official = [], candidates = [], phase
       return selector === '[data-autom="checkout"]' ? official : candidates;
     },
     querySelector(selector) { return selectors[selector]?.[0] || null; },
+    addEventListener(type, listener) { if (type === 'click') clickHandler = listener; },
   };
   const window = {};
   window.top = window;
@@ -49,7 +51,7 @@ async function page({ pathname, hash = '', official = [], candidates = [], phase
     setTimeout() { return 1; },
   });
   await new Promise(setImmediate);
-  return { history, notices, get phase() { return currentPhase; } };
+  return { history, notices, click(target) { clickHandler?.({ target }); }, get phase() { return currentPhase; } };
 }
 
 test('marked bag clicks the official checkout button once', async () => {
@@ -139,4 +141,17 @@ test('billing selects Alipay and leaves the final Apple order button to the user
   assert.equal(alipay.clicks, 1);
   assert.equal(review.clicks, 0);
   assert.equal(order.clicks, 0);
+});
+
+test('records final order only after the Apple order button is clicked', async () => {
+  const order = button('现在下订单');
+  const result = await page({
+    pathname: '/shop/checkout', phase: 'guest-clicked',
+    selectors: { '[data-autom="continue-button-placeOrder"]': [order], '[role="dialog"]': [] },
+  });
+  assert.equal(result.phase, 'guest-clicked');
+  assert.equal(order.clicks, 0);
+  result.click({ closest(selector) { return selector === '[data-autom="continue-button-placeOrder"]' ? order : null; } });
+  await new Promise(setImmediate);
+  assert.equal(result.phase, 'order-submitted');
 });

@@ -11,6 +11,7 @@
   let done = false;
   let scheduled = false;
   const clickedSteps = new Set();
+  let orderNoted = false;
   const startedAt = Date.now();
 
   function visible(element) {
@@ -168,6 +169,13 @@
   }
 
   async function start() {
+    if (CHECKOUT_PATH.test(location.pathname)) {
+      document.addEventListener('click', (event) => {
+        if (orderNoted || !event.target?.closest?.('[data-autom="continue-button-placeOrder"]')) return;
+        orderNoted = true;
+        void chrome.runtime.sendMessage({ type: 'apw-checkout-step', phase: 'order-submitted' });
+      }, true);
+    }
     if (markedBag) {
       const begun = await chrome.runtime.sendMessage({ type: 'apw-begin-checkout', storeNumber });
       if (!begun) return;

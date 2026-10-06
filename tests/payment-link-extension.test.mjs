@@ -14,10 +14,11 @@ function background() {
   const local = new Map([['apwBridgeToken', 'a'.repeat(32)]]);
   const requests = [];
   let onMessage;
+  let onCreated;
   const chrome = {
     runtime: { onMessage: { addListener(listener) { onMessage = listener; } } },
     tabs: {
-      onCreated: { addListener() {} },
+      onCreated: { addListener(listener) { onCreated = listener; } },
       onRemoved: { addListener() {} },
     },
     storage: {
@@ -44,7 +45,7 @@ function background() {
       if (!accepted) resolve(null);
     });
   }
-  return { send, requests, local };
+  return { send, requests, local, createTab(tab) { onCreated(tab); } };
 }
 
 test('only an active Apple guest checkout forwards a payment link', async () => {
@@ -57,6 +58,8 @@ test('only an active Apple guest checkout forwards a payment link', async () => 
   await app.send({ type: 'apw-checkout-step', phase: 'bag-clicked' }, apple);
   await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
   assert.equal((await app.send(request, alipay, 2))?.reason, 'no-active-checkout');
+  assert.equal((await app.send(request, alipay))?.reason, 'no-active-checkout');
+  await app.send({ type: 'apw-checkout-step', phase: 'order-submitted' }, 'https://secure11.www.apple.com.cn/shop/checkout');
   assert.equal((await app.send(request, alipay))?.ok, true);
   assert.equal(app.requests.length, 1);
   assert.equal(JSON.parse(app.requests[0].options.body).url, alipay);
@@ -68,11 +71,24 @@ test('rejects unrelated or forged cashier URLs and missing pairing code', async 
   await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683' }, apple);
   await app.send({ type: 'apw-checkout-step', phase: 'bag-clicked' }, apple);
   await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
+  await app.send({ type: 'apw-checkout-step', phase: 'order-submitted' }, 'https://secure11.www.apple.com.cn/shop/checkout');
   assert.equal((await app.send({ type: 'apw-payment-link', kind: 'cashier', url: 'https://alipay.com.evil.example/pay' }, alipay))?.reason, 'invalid-link');
   assert.equal((await app.send({ type: 'apw-payment-link', kind: 'cashier', url: 'https://qr.alipay.com/abc' }, alipay))?.reason, 'invalid-link');
   app.local.delete('apwBridgeToken');
   assert.equal((await app.send({ type: 'apw-payment-link', kind: 'cashier', url: alipay }, alipay))?.reason, 'missing-pairing-code');
   assert.equal(app.requests.length, 0);
+});
+
+test('new Alipay tab follows the parent order submission even when opened first', async () => {
+  const app = background();
+  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683' }, apple);
+  await app.send({ type: 'apw-checkout-step', phase: 'bag-clicked' }, apple);
+  await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
+  app.createTab({ id: 2, openerTabId: 1 });
+  await new Promise(setImmediate);
+  await app.send({ type: 'apw-checkout-step', phase: 'order-submitted' }, 'https://secure11.www.apple.com.cn/shop/checkout');
+  assert.equal((await app.send({ type: 'apw-get-checkout' }, alipay, 2))?.phase, 'order-submitted');
+  assert.equal((await app.send({ type: 'apw-payment-link', kind: 'cashier', url: alipay }, alipay, 2))?.ok, true);
 });
 
 async function capture({ flow, nodes, now = 0 }) {
@@ -114,7 +130,7 @@ test('captures the QR target encoded in a visible cashier image', async () => {
       return key === 'src' ? `https://excashier.alipay.com/qrcode?url=${encodeURIComponent(qr)}` : null;
     },
   };
-  const sent = await capture({ flow: { phase: 'guest-clicked' }, nodes: [image] });
+  const sent = await capture({ flow: { phase: 'order-submitted' }, nodes: [image] });
   assert.equal(sent.length, 1);
   assert.equal(sent[0].kind, 'qr');
   assert.equal(sent[0].url, qr);

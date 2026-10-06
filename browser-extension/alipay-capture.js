@@ -126,7 +126,7 @@
     // 新标签页创建时，后台复制结账会话可能稍晚于内容脚本启动。
     for (let attempt = 0; attempt < 10; attempt++) {
       const flow = await chrome.runtime.sendMessage({ type: 'apw-get-checkout' });
-      if (flow?.phase === 'guest-clicked') { active = true; break; }
+      if (flow?.phase === 'order-submitted') { active = true; break; }
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
     if (!active) return;

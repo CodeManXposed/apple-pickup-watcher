@@ -1,5 +1,6 @@
 // 以 Chrome tab 为单位保存一次购买流程。session 存储会在扩展重载或浏览器重启时清空。
 const FLOW_PREFIX = 'apwCheckoutFlow:';
+const PARENT_PREFIX = 'apwCheckoutParent:';
 const FLOW_TTL_MS = 60 * 60 * 1000;
 const BRIDGE_URL = 'http://127.0.0.1:43849/payment-link';
 
@@ -19,7 +20,14 @@ function applePage(url) {
 
 async function flowFor(tabId) {
   const key = `${FLOW_PREFIX}${tabId}`;
-  const flow = (await chrome.storage.session.get(key))[key];
+  let flow = (await chrome.storage.session.get(key))[key];
+  const parentId = (await chrome.storage.session.get(`${PARENT_PREFIX}${tabId}`))[`${PARENT_PREFIX}${tabId}`];
+  if (Number.isInteger(parentId)) {
+    const parent = (await chrome.storage.session.get(`${FLOW_PREFIX}${parentId}`))[`${FLOW_PREFIX}${parentId}`];
+    if (parent && (!flow || parent.startedAt === flow.startedAt && parent.phase === 'order-submitted')) {
+      flow = parent;
+    }
+  }
   if (!flow) return null;
   if (Date.now() - flow.startedAt <= FLOW_TTL_MS) return flow;
   await chrome.storage.session.remove(key);
@@ -37,7 +45,7 @@ function alipayPage(url) {
 }
 
 async function forwardPaymentLink(message, sender, flow) {
-  if (!flow || flow.phase !== 'guest-clicked' || !alipayPage(sender.url)) {
+  if (!flow || flow.phase !== 'order-submitted' || !alipayPage(sender.url)) {
     return { ok: false, reason: 'no-active-checkout' };
   }
   if (!['qr', 'cashier'].includes(message.kind) || !alipayPage(message.url)) {
@@ -81,7 +89,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     const flow = await flowFor(tabId);
     if (message?.type === 'apw-get-checkout') return flow;
     if (message?.type === 'apw-checkout-step' && flow && applePage(sender.url)) {
-      const next = { bag: 'bag-clicked', 'bag-clicked': 'guest-clicked' }[flow.phase];
+      const next = { bag: 'bag-clicked', 'bag-clicked': 'guest-clicked', 'guest-clicked': 'order-submitted' }[flow.phase];
       if (next !== message.phase) return null;
       const updated = { ...flow, phase: next };
       await chrome.storage.session.set({ [key]: updated });
@@ -97,6 +105,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
 
 chrome.tabs.onCreated.addListener((tab) => {
   if (!Number.isInteger(tab.id) || !Number.isInteger(tab.openerTabId)) return;
+  chrome.storage.session.set({ [`${PARENT_PREFIX}${tab.id}`]: tab.openerTabId }).catch(() => {});
   flowFor(tab.openerTabId).then(async (flow) => {
     if (flow) await chrome.storage.session.set({ [`${FLOW_PREFIX}${tab.id}`]: flow });
   }).catch(() => {});
@@ -104,4 +113,5 @@ chrome.tabs.onCreated.addListener((tab) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   chrome.storage.session.remove(`${FLOW_PREFIX}${tabId}`).catch(() => {});
+  chrome.storage.session.remove(`${PARENT_PREFIX}${tabId}`).catch(() => {});
 });
