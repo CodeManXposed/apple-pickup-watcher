@@ -17,7 +17,7 @@ function button(label, group = null) {
 }
 
 async function page({ pathname, hash = '', official = [], candidates = [], phase = null, selectors = {} }) {
-  const location = { pathname, search: '', hash };
+  const location = { pathname, search: '', hash, origin: 'https://www.apple.com.cn' };
   const history = { state: null, replaceState(_state, _title, url) { this.url = url; } };
   const notices = new Map();
   let currentPhase = phase;
@@ -46,7 +46,7 @@ async function page({ pathname, hash = '', official = [], candidates = [], phase
   const window = {};
   window.top = window;
   vm.runInNewContext(script, {
-    window, location, history, document, chrome, URLSearchParams, Date,
+    window, location, history, document, chrome, URLSearchParams, URL, Date,
     MutationObserver: class { observe() {} },
     setTimeout() { return 1; },
   });
@@ -57,13 +57,45 @@ async function page({ pathname, hash = '', official = [], candidates = [], phase
 test('marked bag clicks the official checkout button once', async () => {
   const checkout = button('结账', {});
   const applePay = button('Check out with Apple Pay');
+  const item = { href: 'https://www.apple.com.cn/shop/product/mjye4ch/a',
+    closest() { return { querySelector() { return { value: '1' }; } }; } };
   const result = await page({
-    pathname: '/shop/bag', hash: '#apw-checkout=1&apw-store=R683', official: [checkout], candidates: [applePay],
+    pathname: '/shop/bag', hash: '#apw-checkout=1&apw-store=R683&apw-part=MJYE4CH%2FA',
+    official: [checkout], candidates: [applePay],
+    selectors: { '[data-autom="bag-item-name"]': [item] },
   });
   assert.equal(checkout.clicks, 1);
   assert.equal(applePay.clicks, 0);
   assert.equal(result.phase, 'bag-clicked');
   assert.equal(result.history.url, '/shop/bag');
+});
+
+test('bag without the exact target SKU does not enter checkout', async () => {
+  const checkout = button('结账', {});
+  const result = await page({
+    pathname: '/shop/bag', hash: '#apw-checkout=1&apw-store=R683&apw-part=MJYE4CH%2FA',
+    official: [checkout], selectors: { '[data-autom="bag-item-name"]': [
+      { href: 'https://www.apple.com.cn/shop/product/otherch/a' },
+    ] },
+  });
+  assert.equal(checkout.clicks, 0);
+  assert.equal(result.phase, null);
+});
+
+test('bag with extra items or target quantity two does not enter checkout', async () => {
+  const checkout = button('结账', {});
+  const target = { href: 'https://www.apple.com.cn/shop/product/mjye4ch/a',
+    closest() { return { querySelector() { return { value: '2' }; } }; } };
+  const base = {
+    pathname: '/shop/bag', hash: '#apw-checkout=1&apw-store=R683&apw-part=MJYE4CH%2FA',
+    official: [checkout],
+  };
+  const quantity = await page({ ...base, selectors: { '[data-autom="bag-item-name"]': [target] } });
+  assert.equal(quantity.phase, null);
+  const extra = await page({ ...base, selectors: { '[data-autom="bag-item-name"]': [target,
+    { href: 'https://www.apple.com.cn/shop/product/mw493fe/a' }] } });
+  assert.equal(extra.phase, null);
+  assert.equal(checkout.clicks, 0);
 });
 
 test('unmarked bag cannot start checkout and guest step does not place an order', async () => {

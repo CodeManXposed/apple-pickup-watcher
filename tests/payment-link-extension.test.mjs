@@ -54,7 +54,7 @@ test('only an active Apple guest checkout forwards a payment link', async () => 
   assert.equal((await app.send(request, alipay))?.reason, 'no-active-checkout');
   assert.equal(app.requests.length, 0);
 
-  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683' }, apple);
+  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A' }, apple);
   await app.send({ type: 'apw-checkout-step', phase: 'bag-clicked' }, apple);
   await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
   assert.equal((await app.send(request, alipay, 2))?.reason, 'no-active-checkout');
@@ -68,7 +68,7 @@ test('only an active Apple guest checkout forwards a payment link', async () => 
 
 test('rejects unrelated or forged cashier URLs and missing pairing code', async () => {
   const app = background();
-  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683' }, apple);
+  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A' }, apple);
   await app.send({ type: 'apw-checkout-step', phase: 'bag-clicked' }, apple);
   await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
   await app.send({ type: 'apw-checkout-step', phase: 'order-submitted' }, 'https://secure11.www.apple.com.cn/shop/checkout');
@@ -81,7 +81,7 @@ test('rejects unrelated or forged cashier URLs and missing pairing code', async 
 
 test('new Alipay tab follows the parent order submission even when opened first', async () => {
   const app = background();
-  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683' }, apple);
+  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A' }, apple);
   await app.send({ type: 'apw-checkout-step', phase: 'bag-clicked' }, apple);
   await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
   app.createTab({ id: 2, openerTabId: 1 });

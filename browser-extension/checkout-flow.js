@@ -7,11 +7,13 @@
   const params = new URLSearchParams(location.hash.slice(1));
   const markedBag = isBag && params.get('apw-checkout') === '1';
   const storeNumber = params.get('apw-store');
+  const partNumber = (params.get('apw-part') || '').toUpperCase();
   const GUEST_TEXT = /^(?:(?:以访客身份|以游客身份)(?:继续|结[账帐]|购买)|(?:继续)?以访客身份结[账帐]|访客结[账帐]|访客继续|continue as (?:a )?guest|guest checkout)$/i;
   let done = false;
   let scheduled = false;
   const clickedSteps = new Set();
   let orderNoted = false;
+  let begun = false;
   const startedAt = Date.now();
 
   function visible(element) {
@@ -46,6 +48,20 @@
     return Array.from(document.querySelectorAll('button, a, [role="button"]')).find((element) =>
       visible(element) && /^(?:结[账帐]|立即结[账帐]|去结[账帐]|check out(?: now)?|proceed to checkout)$/i
         .test((element.getAttribute('aria-label') || element.textContent || '').trim()));
+  }
+
+  function bagStatus() {
+    if (!/^[A-Z0-9]{4,20}\/[A-Z]$/.test(partNumber)) return 'invalid';
+    const items = Array.from(document.querySelectorAll('[data-autom="bag-item-name"]'));
+    if (!items.length) return 'loading';
+    if (items.length !== 1) return 'other-items';
+    const item = items[0];
+    try {
+      if (!new URL(item.href, location.origin).pathname.toUpperCase()
+        .endsWith(`/SHOP/PRODUCT/${partNumber}`)) return 'other-items';
+    } catch { return 'invalid'; }
+    const quantity = item.closest('.rs-iteminfo-details')?.querySelector('[data-autom="item-quantity-dropdown"]');
+    return quantity?.value === '1' ? 'ready' : 'quantity';
   }
 
   function guestButton() {
@@ -131,6 +147,23 @@
 
   async function act() {
     if (done) return;
+    if (markedBag) {
+      const status = bagStatus();
+      if (status !== 'ready') {
+        if (status !== 'loading' || Date.now() - startedAt > 30000) {
+          done = true;
+          notice(`购物袋须仅包含一件 ${partNumber}；请检查商品和数量后手动结账。`, true);
+        }
+        return;
+      }
+    }
+    if (markedBag && !begun) {
+      const started = await chrome.runtime.sendMessage({ type: 'apw-begin-checkout', storeNumber, partNumber });
+      if (!started) { done = true; return; }
+      begun = true;
+      history.replaceState(history.state, '', location.pathname + location.search);
+      notice('已确认目标商品，正在查找结账按钮…');
+    }
     const flow = await chrome.runtime.sendMessage({ type: 'apw-get-checkout' });
     if (!flow) { done = true; return; }
     if (isBag && markedBag && flow.phase === 'bag') {
@@ -175,12 +208,6 @@
         orderNoted = true;
         void chrome.runtime.sendMessage({ type: 'apw-checkout-step', phase: 'order-submitted' });
       }, true);
-    }
-    if (markedBag) {
-      const begun = await chrome.runtime.sendMessage({ type: 'apw-begin-checkout', storeNumber });
-      if (!begun) return;
-      history.replaceState(history.state, '', location.pathname + location.search);
-      notice('已加入购物袋，正在查找结账按钮…');
     }
     await act();
     if (done) return;

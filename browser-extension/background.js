@@ -82,7 +82,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if (message?.type === 'apw-begin-checkout' && applePage(sender.url)) {
       if (!/\/shop\/bag\/?$/.test(new URL(sender.url).pathname)) return null;
       if (!/^[A-Z0-9]{2,10}$/.test(message.storeNumber || '')) return null;
-      const flow = { startedAt: Date.now(), phase: 'bag', storeNumber: message.storeNumber };
+      if (!/^[A-Z0-9]{4,20}\/[A-Z]$/.test(message.partNumber || '')) return null;
+      const flow = { startedAt: Date.now(), phase: 'bag', storeNumber: message.storeNumber, partNumber: message.partNumber };
       await chrome.storage.session.set({ [key]: flow });
       return flow;
     }
