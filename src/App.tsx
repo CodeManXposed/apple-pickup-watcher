@@ -788,7 +788,7 @@ export default function App() {
                   />
                   <Label htmlFor="autoadd">有货时自动加车</Label>
                   <span className="text-muted-foreground text-xs">
-                    需在 Chrome 扩展程序中开启开发者模式并加载配套扩展
+                    安装配套 Chrome 扩展后，可在扩展图标中设置结账资料
                   </span>
                   <Button variant="outline" size="sm" onClick={() => void openExtensionFolder()}>
                     打开扩展目录

@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Apple Pickup Watcher · 结账资料</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f5f5f7; color: #1d1d1f; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { max-width: 850px; margin: 48px auto; padding: 0 20px 48px; }
+    h1 { font-size: 30px; margin: 0 0 8px; }
+    h2 { font-size: 19px; margin: 0 0 8px; }
+    p { margin: 0 0 20px; color: #515154; }
+    section { background: #fff; border: 1px solid #dedee2; border-radius: 16px; padding: 24px; margin: 16px 0; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    label { display: block; font-weight: 600; font-size: 13px; }
+    input[type="text"], input[type="email"], input[type="tel"] { width: 100%; height: 40px; margin-top: 6px; padding: 8px 11px; border: 1px solid #aaaab0; border-radius: 8px; background: #fff; color: inherit; font: inherit; }
+    input:focus { outline: 2px solid #0071e3; outline-offset: 1px; }
+    .wide { grid-column: 1 / -1; }
+    .toggle { display: flex; align-items: center; gap: 10px; font-size: 15px; }
+    .toggle input { width: 18px; height: 18px; }
+    .hint { font-size: 13px; margin: 0 0 16px; }
+    .actions { display: flex; align-items: center; gap: 16px; margin-top: 22px; }
+    button { border: 0; border-radius: 9px; background: #0071e3; color: #fff; padding: 10px 20px; font: inherit; cursor: pointer; }
+    button:hover { background: #0066cc; }
+    button.secondary { background: #e8e8ed; color: #1d1d1f; }
+    button.secondary:hover { background: #dedee3; }
+    #status { color: #17663a; }
+    @media (max-width: 600px) { main { margin-top: 24px; } .grid { grid-template-columns: 1fr; } .wide { grid-column: auto; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>结账资料</h1>
+    <p>资料仅保存在此 Chrome 扩展的本地存储中。进入 Apple 结账页时，只填用途明确的空白字段；请在下单前核对。不会填写付款卡资料，也不会提交订单。</p>
+    <form id="profile-form">
+      <section>
+        <label class="toggle"><input type="checkbox" name="enabled" checked> 在 Apple 结账页自动填充</label>
+      </section>
+      <section>
+        <h2>到店取货联系人</h2>
+        <p class="hint">如由他人代取，请填写实际取货人的资料；姓名须与取货证件一致。</p>
+        <div class="grid">
+          <label>姓 <input type="text" name="pickup.familyName" autocomplete="off"></label>
+          <label>名 <input type="text" name="pickup.givenName" autocomplete="off"></label>
+          <label class="wide">姓名（页面只有一个姓名框时使用） <input type="text" name="pickup.fullName" autocomplete="off"></label>
+          <label>手机或电话 <input type="tel" name="pickup.phone" autocomplete="off"></label>
+          <label>邮箱 <input type="email" name="pickup.email" autocomplete="off"></label>
+        </div>
+      </section>
+      <section>
+        <h2>配送收货资料</h2>
+        <p class="hint">省、市、区等下拉选择若无法确认，需在 Apple 页面手动选择。</p>
+        <div class="grid">
+          <label>姓 <input type="text" name="delivery.familyName" autocomplete="off"></label>
+          <label>名 <input type="text" name="delivery.givenName" autocomplete="off"></label>
+          <label class="wide">姓名（单个姓名框） <input type="text" name="delivery.fullName" autocomplete="off"></label>
+          <label>手机或电话 <input type="tel" name="delivery.phone" autocomplete="off"></label>
+          <label>邮箱 <input type="email" name="delivery.email" autocomplete="off"></label>
+          <label class="wide">详细地址 <input type="text" name="delivery.address1" autocomplete="off"></label>
+          <label class="wide">地址补充（可选） <input type="text" name="delivery.address2" autocomplete="off"></label>
+          <label>国家或地区 <input type="text" name="delivery.country" autocomplete="off"></label>
+          <label>省或州 <input type="text" name="delivery.state" autocomplete="off"></label>
+          <label>城市 <input type="text" name="delivery.city" autocomplete="off"></label>
+          <label>区或县 <input type="text" name="delivery.district" autocomplete="off"></label>
+          <label>邮政编码 <input type="text" name="delivery.postalCode" autocomplete="off"></label>
+        </div>
+      </section>
+      <div class="actions">
+        <button type="submit">保存到此 Chrome</button>
+        <button class="secondary" id="clear-profile" type="button">删除已保存资料</button>
+        <span id="status" role="status" aria-live="polite"></span>
+      </div>
+    </form>
+  </main>
+  <script src="profile.js"></script>
+</body>
+</html>
