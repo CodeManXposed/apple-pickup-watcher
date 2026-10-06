@@ -18,6 +18,12 @@ function input({ name, label = '', value = '', type = 'text', parent = null }) {
   };
 }
 
+function select({ name, label = '', value = '', parent = null, options = [] }) {
+  return {
+    ...input({ name, label, value, parent }), tagName: 'SELECT', type: 'select-one', options,
+  };
+}
+
 function section(className) {
   return {
     id: '', className, children: [], parentElement: null,
@@ -49,6 +55,7 @@ async function run(fields, saved, pathname = '/shop/checkout') {
     chrome, document, location: { pathname },
     window: { addEventListener(type, listener) { listeners.set(type, listener); } },
     HTMLInputElement: InputElement, HTMLTextAreaElement: class {},
+    HTMLSelectElement: class {},
     Event: class { constructor(type) { this.type = type; } },
     MutationObserver: class { constructor(callback) { observer = callback; } observe() {} },
     setTimeout(callback) { callback(); },
@@ -102,4 +109,28 @@ test('only runs in checkout, respects disable switch, and fills later form steps
   fields.push(latest);
   runtime.requestFill();
   assert.equal(latest.value, '李');
+});
+
+test('selects only one exact delivery option and preserves existing or ambiguous choices', async () => {
+  const delivery = section('shipping-address');
+  const province = select({ name: 'province', parent: delivery, options: [
+    { value: '', textContent: '请选择' },
+    { value: 'BJ', textContent: '北京市' },
+    { value: 'SH', textContent: '上海市' },
+  ] });
+  const ambiguous = select({ name: 'city', parent: delivery, options: [
+    { value: 'A', textContent: '朝阳区' },
+    { value: 'B', textContent: '朝阳区' },
+  ] });
+  const existing = select({ name: 'district', parent: delivery, value: 'PUDONG', options: [
+    { value: 'PUDONG', textContent: '浦东新区' },
+    { value: 'CHAoyang', textContent: '朝阳区' },
+  ] });
+  await run([province, ambiguous, existing], {
+    ...profile, delivery: { ...profile.delivery, state: '北京市', city: '朝阳区', district: '朝阳区' },
+  });
+  assert.equal(province.value, 'BJ');
+  assert.deepEqual(province.events, ['input', 'change']);
+  assert.equal(ambiguous.value, '');
+  assert.equal(existing.value, 'PUDONG');
 });
