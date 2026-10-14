@@ -406,16 +406,6 @@ fn current(root: &Path, platform: &str) -> Option<(String, PathBuf)> {
     binary.is_file().then(|| (version.to_owned(), binary))
 }
 
-pub(crate) fn ready(app: &AppHandle) -> Result<BrowserReady, String> {
-    let platform = platform()?;
-    let root = root(app)?;
-    let browser = current(&root, platform)
-        .map(|(version, _)| BrowserReady { version })
-        .ok_or_else(|| "请先在 Profile 页准备独立浏览器".to_owned())?;
-    installed_extension(app)?;
-    Ok(browser)
-}
-
 fn valid_version(version: &str) -> bool {
     version.len() <= 40
         && version.split('.').count() == 4
@@ -706,18 +696,12 @@ fn cdp_call_with_session(
 /// Chrome 品牌版本从 137 起移除了 --load-extension；先装扩展再开页面。
 /// https://developer.chrome.com/blog/extension-news-june-2025
 /// 独立配置文件与调试端口都仅用于本应用，不触碰日常 Chrome。
-fn launch(app: &AppHandle, task_url: Option<&str>) -> Result<(), String> {
-    let _guard = BROWSER_LAUNCH
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
+fn loaded_browser(app: &AppHandle) -> Result<(WebSocket<TcpStream>, InstalledExtension), String> {
     let platform = platform()?;
     let root = root(app)?;
     let (_, binary) =
         current(&root, platform).ok_or_else(|| "请先在 Profile 页准备独立浏览器".to_owned())?;
     let extension = installed_extension(app)?;
-    let url = task_url
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("chrome-extension://{}/profile.html", extension.id));
     let profile = root.join("profile");
     fs::create_dir_all(&profile).map_err(|e| format!("建立浏览器资料目录失败：{e}"))?;
     let mut browser = browser_connection(&profile, &binary)?;
@@ -731,6 +715,116 @@ fn launch(app: &AppHandle, task_url: Option<&str>) -> Result<(), String> {
     if loaded.get("id").and_then(Value::as_str) != Some(&extension.id) {
         return Err("浏览器加载的扩展 ID 与原 Profile 不一致；已停止本次任务".into());
     }
+    Ok((browser, extension))
+}
+
+fn check_checkout_profile(data: &Value, pairing_code: &str) -> Result<(), String> {
+    if data.get("apwBridgeToken").and_then(Value::as_str) != Some(pairing_code) {
+        return Err(
+            "扩展连接码未保存或与桌面应用不匹配；请在 Profile 页打开编辑器，粘贴连接码并保存"
+                .into(),
+        );
+    }
+    let Some(profile) = data.get("apwCheckoutProfile") else {
+        return Err("尚未保存结账资料；请在 Profile 页打开编辑器填写取货联系人".into());
+    };
+    if profile.get("enabled").and_then(Value::as_bool) != Some(true) {
+        return Err("结账资料自动填充未启用；请在 Profile 编辑器中启用并保存".into());
+    }
+    let pickup = &profile["pickup"];
+    let has = |key: &str| {
+        pickup
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    if !((has("familyName") && has("givenName")) || has("fullName"))
+        || !has("phone")
+        || !has("email")
+    {
+        return Err("取货联系人缺少姓名、电话或邮箱；请在 Profile 编辑器中补全并保存".into());
+    }
+    Ok(())
+}
+
+fn checkout_storage(
+    browser: &mut WebSocket<TcpStream>,
+    extension_id: &str,
+) -> Result<Value, String> {
+    // Extensions.getStorageItems 需要关联到默认浏览器上下文的页面会话。
+    // 用临时扩展页读取，确保扩展已完成注册；完成后关闭，不改变 Apple 购物袋。
+    let created = cdp_call(
+        browser,
+        2,
+        "Target.createTarget",
+        serde_json::json!({
+            "url": format!("chrome-extension://{extension_id}/profile.html"),
+            "background": true,
+        }),
+    )?;
+    let target_id = created
+        .get("targetId")
+        .and_then(Value::as_str)
+        .ok_or("浏览器未创建预检页面")?;
+    let result = (|| {
+        let attached = cdp_call(
+            browser,
+            3,
+            "Target.attachToTarget",
+            serde_json::json!({"targetId": target_id, "flatten": true}),
+        )?;
+        let session = attached
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .ok_or("浏览器未创建预检会话")?;
+        let stored = cdp_call_with_session(
+            browser,
+            4,
+            "Extensions.getStorageItems",
+            serde_json::json!({
+                "id": extension_id,
+                "storageArea": "local",
+                "keys": ["apwBridgeToken", "apwCheckoutProfile"],
+            }),
+            Some(session),
+        )?;
+        stored
+            .get("data")
+            .cloned()
+            .ok_or_else(|| "浏览器未返回扩展资料状态".to_owned())
+    })();
+    let closed = cdp_call(
+        browser,
+        5,
+        "Target.closeTarget",
+        serde_json::json!({"targetId": target_id}),
+    );
+    let data = result?;
+    if closed?.get("success").and_then(Value::as_bool) != Some(true) {
+        return Err("浏览器未关闭预检页面".into());
+    }
+    Ok(data)
+}
+
+/// 在库存轮询开始前确认扩展实际已载入，且能继续从购物袋进入结账。
+/// 资料只在内存中检查；不写入桌面配置或日志。
+pub(crate) fn preflight(app: &AppHandle, pairing_code: &str) -> Result<(), String> {
+    let _guard = BROWSER_LAUNCH
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (mut browser, extension) = loaded_browser(app)?;
+    let data = checkout_storage(&mut browser, &extension.id)?;
+    check_checkout_profile(&data, pairing_code)
+}
+
+fn launch(app: &AppHandle, task_url: Option<&str>) -> Result<(), String> {
+    let _guard = BROWSER_LAUNCH
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (mut browser, extension) = loaded_browser(app)?;
+    let url = task_url
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("chrome-extension://{}/profile.html", extension.id));
     let created = cdp_call(
         &mut browser,
         2,
@@ -763,6 +857,43 @@ pub(crate) fn open_profile(app: &AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkout_preflight_requires_paired_and_complete_pickup_profile() {
+        let code = "a".repeat(32);
+        let valid = serde_json::json!({
+            "apwBridgeToken": code,
+            "apwCheckoutProfile": {
+                "enabled": true,
+                "pickup": {"familyName": "测", "givenName": "试", "phone": "13800000000", "email": "test@example.com"}
+            }
+        });
+        assert!(check_checkout_profile(&valid, &code).is_ok());
+
+        let mut unpaired = valid.clone();
+        unpaired["apwBridgeToken"] = Value::String("b".repeat(32));
+        assert!(
+            check_checkout_profile(&unpaired, &code)
+                .unwrap_err()
+                .contains("连接码")
+        );
+
+        let mut disabled = valid.clone();
+        disabled["apwCheckoutProfile"]["enabled"] = Value::Bool(false);
+        assert!(
+            check_checkout_profile(&disabled, &code)
+                .unwrap_err()
+                .contains("未启用")
+        );
+
+        let mut incomplete = valid;
+        incomplete["apwCheckoutProfile"]["pickup"]["email"] = Value::String(" ".into());
+        assert!(
+            check_checkout_profile(&incomplete, &code)
+                .unwrap_err()
+                .contains("邮箱")
+        );
+    }
 
     #[cfg(unix)]
     #[test]
@@ -946,6 +1077,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(loaded["id"], installed.id);
+        assert!(
+            checkout_storage(&mut socket, &installed.id)
+                .unwrap()
+                .get("apwCheckoutProfile")
+                .is_none()
+        );
         let created = cdp_call(
             &mut socket,
             2,
@@ -985,6 +1122,59 @@ mod tests {
             command_id += 1;
             thread::sleep(Duration::from_millis(100));
         }
+        command_id += 1;
+        let empty = cdp_call_with_session(
+            &mut socket,
+            command_id,
+            "Extensions.getStorageItems",
+            serde_json::json!({
+                "id": installed.id,
+                "storageArea": "local",
+                "keys": ["apwBridgeToken", "apwCheckoutProfile"],
+            }),
+            Some(session),
+        )
+        .unwrap();
+        assert!(empty["data"].get("apwCheckoutProfile").is_none());
+        command_id += 1;
+        let code = "a".repeat(32);
+        cdp_call_with_session(
+            &mut socket,
+            command_id,
+            "Extensions.setStorageItems",
+            serde_json::json!({
+                "id": installed.id,
+                "storageArea": "local",
+                "values": {
+                    "apwBridgeToken": code,
+                    "apwCheckoutProfile": {
+                        "enabled": true,
+                        "pickup": {"fullName": "测试", "phone": "13800000000", "email": "test@example.com"}
+                    }
+                },
+            }),
+            Some(session),
+        )
+        .unwrap();
+        command_id += 1;
+        let stored = cdp_call_with_session(
+            &mut socket,
+            command_id,
+            "Extensions.getStorageItems",
+            serde_json::json!({
+                "id": installed.id,
+                "storageArea": "local",
+                "keys": ["apwBridgeToken", "apwCheckoutProfile"],
+            }),
+            Some(session),
+        )
+        .unwrap();
+        check_checkout_profile(&stored["data"], &code).unwrap();
+        check_checkout_profile(
+            &checkout_storage(&mut socket, &installed.id).unwrap(),
+            &code,
+        )
+        .unwrap();
         drop(socket);
         drop(browser);
     }

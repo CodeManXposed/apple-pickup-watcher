@@ -294,6 +294,20 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>(readWorkspaceTab());
   const [profileFeedback, setProfileFeedback] = useState("");
   const [browserPreparing, setBrowserPreparing] = useState(false);
+  const [watchStarting, setWatchStarting] = useState(false);
+  const [watchStartError, setWatchStartError] = useState("");
+
+  async function onStartWatching() {
+    setWatchStarting(true);
+    setWatchStartError("");
+    try {
+      await startWatching();
+    } catch (error) {
+      setWatchStartError(String(error));
+    } finally {
+      setWatchStarting(false);
+    }
+  }
 
   async function onPrepareBrowser() {
     setBrowserPreparing(true);
@@ -532,12 +546,22 @@ export default function App() {
                 <Pause /> 暂停
               </Button>
             ) : (
-              <Button onClick={() => void startWatching()} disabled={ui.rows.length === 0}>
-                <Play /> 开始
+              <Button aria-label={watchStarting ? "正在检查自动监控环境" : "开始监控"} onClick={() => void onStartWatching()} disabled={ui.rows.length === 0 || watchStarting}>
+                <Play /> {watchStarting ? "正在检查…" : "开始"}
               </Button>
             )}
           </div>
         </header>
+
+        {watchStartError && (
+          <div role="alert" className="border-destructive/30 bg-destructive/5 rounded-lg border px-4 py-3 text-sm">
+            <p className="text-destructive font-medium">未能开始自动监控</p>
+            <p className="mt-1">{watchStartError}</p>
+            {ui.settings.autoAddToBag && (
+              <Button size="sm" variant="outline" className="mt-2" onClick={() => selectTab("profile")}>前往 Profile</Button>
+            )}
+          </div>
+        )}
 
         <nav aria-label="工作区" className="grid w-full grid-cols-3 border-b" role="tablist">
           {([
@@ -1135,7 +1159,7 @@ export default function App() {
                 <Button variant="outline" size="sm" className="ml-auto" onClick={() => selectTab("profile")}>设置 Profile</Button>
               </div>
               <p className="text-muted-foreground mt-2 text-sm">
-                每次开始监控后，最多为首个有货目标启动一项独立浏览器任务；其他目标继续监控并提醒。结账资料和自动下单上限在 Profile 页介绍的扩展设置中配置。
+                开始监控前会检查独立浏览器、扩展连接码和取货资料。每次监控最多为首个有货目标启动一项浏览器任务；其他目标继续监控并提醒。结账资料和自动下单上限在 Profile 页介绍的扩展设置中配置。
               </p>
             </section>
 

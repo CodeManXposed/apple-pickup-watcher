@@ -322,8 +322,10 @@ async fn set_interval(state: tauri::State<'_, AppState>, seconds: u64) -> Result
 #[tauri::command]
 async fn start_watching(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
     if state.settings_snapshot().auto_add_to_bag {
-        browser_bot::ready(&app)?;
-        app.state::<PaymentBridge>().pairing_code()?;
+        let pairing_code = app.state::<PaymentBridge>().pairing_code()?.to_owned();
+        tauri::async_runtime::spawn_blocking(move || browser_bot::preflight(&app, &pairing_code))
+            .await
+            .map_err(|e| format!("检查自动结账环境中断：{e}"))??;
     }
     state.watcher.start().await;
     Ok(())

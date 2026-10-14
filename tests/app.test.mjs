@@ -5,6 +5,7 @@ import { loadSource } from "./load-source.mjs";
 function renderApp() {
   const saved = [];
   let browserOpens = 0;
+  let startFailure = null;
   const addedTargets = [];
   const pushSaves = [];
   const state = {
@@ -29,6 +30,7 @@ function renderApp() {
     if (specifier === "@/lib/store") return {
       watcherStore: { getSnapshot: () => state },
       openBotBrowser: async () => { browserOpens++; },
+      startWatching: async () => { if (startFailure) throw startFailure; },
       saveSettings: async (settings) => { saved.push(settings); state.settings = settings; },
       setTargets: async (targets) => { addedTargets.push(targets); },
       setCategory: (category) => { state.category = category; },
@@ -103,6 +105,9 @@ function renderApp() {
     taskRows: () => all((element) => element?.type === "TableRow").length,
     profileSetupButton: () => control((element) => element?.type === "Button" && element.props.children === "准备独立浏览器"),
     profileEditorButton: () => control((element) => element?.type === "Button" && element.props.children === "打开 Profile 编辑器"),
+    startButton: () => control((element) => element?.props?.["aria-label"] === "开始监控"),
+    alerts: () => all((element) => element?.props?.role === "alert").map((element) => JSON.stringify(element.props)),
+    setStartFailure: (error) => { startFailure = error; },
     browserOpens: () => browserOpens,
     paymentLinks: () => all((element) => element?.type === "a" &&
       typeof element.props.href === "string" && element.props.href.includes("alipay.com"))
@@ -175,6 +180,20 @@ test("the task page displays the latest cashier or QR payment link", () => {
   assert.equal(app.paymentLinks()[0].href, cashier);
   app.state.paymentLink = { url: qr, kind: "qr", receivedAt: 2 };
   assert.equal(app.paymentLinks()[0].href, qr, "a refreshed QR link should replace the cashier link");
+});
+
+test("a failed browser preflight is visible without starting monitoring", async () => {
+  const app = renderApp();
+  app.state.settings.autoAddToBag = true;
+  app.state.rows = [{
+    target: { partNumber: "TEST/A", storeNumber: "R001", productName: "测试商品", storeTitle: "测试门店" },
+    availability: { kind: "pending" },
+  }];
+  app.setStartFailure(new Error("缺少取货资料"));
+  app.startButton().onClick();
+  await new Promise(setImmediate);
+  assert.match(app.alerts().join(" "), /缺少取货资料/);
+  assert.equal(app.state.running, undefined);
 });
 
 test("saved push addresses are one list with channel labels", () => {
