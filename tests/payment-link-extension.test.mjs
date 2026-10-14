@@ -61,9 +61,11 @@ test('only an active Apple guest checkout forwards a payment link', async () => 
   assert.equal((await app.send(request, alipay))?.reason, 'no-active-checkout');
   await app.send({ type: 'apw-checkout-step', phase: 'order-submitted' }, 'https://secure11.www.apple.com.cn/shop/checkout');
   assert.equal((await app.send(request, alipay))?.ok, true);
-  assert.equal(app.requests.length, 1);
-  assert.equal(JSON.parse(app.requests[0].options.body).url, alipay);
-  assert.equal(app.requests[0].options.headers.Authorization, `Bearer ${'a'.repeat(32)}`);
+  const paymentRequests = app.requests.filter(({ url }) => url.endsWith('/payment-link'));
+  assert.equal(paymentRequests.length, 1);
+  assert.equal(JSON.parse(paymentRequests[0].options.body).url, alipay);
+  assert.equal(JSON.parse(paymentRequests[0].options.body).partNumber, 'MJYE4CH/A');
+  assert.equal(paymentRequests[0].options.headers.Authorization, `Bearer ${'a'.repeat(32)}`);
 });
 
 test('rejects unrelated or forged cashier URLs and missing pairing code', async () => {
@@ -76,7 +78,25 @@ test('rejects unrelated or forged cashier URLs and missing pairing code', async 
   assert.equal((await app.send({ type: 'apw-payment-link', kind: 'cashier', url: 'https://qr.alipay.com/abc' }, alipay))?.reason, 'invalid-link');
   app.local.delete('apwBridgeToken');
   assert.equal((await app.send({ type: 'apw-payment-link', kind: 'cashier', url: alipay }, alipay))?.reason, 'missing-pairing-code');
-  assert.equal(app.requests.length, 0);
+  assert.equal(app.requests.filter(({ url }) => url.endsWith('/payment-link')).length, 0);
+});
+
+test('forwards only stages from the active Apple checkout with its target', async () => {
+  const app = background();
+  const stage = (name) => ({ type: 'apw-task-stage', stage: name });
+  assert.equal((await app.send(stage('bag'), apple))?.reason, 'no-active-checkout');
+  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A' }, apple);
+  assert.equal((await app.send(stage('bag'), apple))?.ok, true);
+  assert.equal((await app.send(stage('review'), apple))?.reason, 'invalid-stage');
+  assert.equal(await app.send(stage('bag'), 'https://evil.example/shop/bag'), null);
+  await app.send({ type: 'apw-checkout-step', phase: 'bag-clicked' }, apple);
+  assert.equal((await app.send(stage('checkout'), apple))?.ok, true);
+  await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
+  assert.equal((await app.send(stage('profile'), 'https://secure11.www.apple.com.cn/shop/checkout'))?.ok, true);
+  const statuses = app.requests.filter(({ url }) => url.endsWith('/task-status'))
+    .map(({ options }) => JSON.parse(options.body));
+  assert.deepEqual(statuses.map(({ stage }) => stage), ['bag', 'checkout', 'profile']);
+  assert.ok(statuses.every(({ partNumber, storeNumber }) => partNumber === 'MJYE4CH/A' && storeNumber === 'R683'));
 });
 
 test('new Alipay tab follows the parent order submission even when opened first', async () => {

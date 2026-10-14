@@ -3,6 +3,7 @@ const FLOW_PREFIX = 'apwCheckoutFlow:';
 const PARENT_PREFIX = 'apwCheckoutParent:';
 const FLOW_TTL_MS = 60 * 60 * 1000;
 const BRIDGE_URL = 'http://127.0.0.1:43849/payment-link';
+const STATUS_URL = 'http://127.0.0.1:43849/task-status';
 
 function applePage(url) {
   try {
@@ -59,14 +60,51 @@ async function forwardPaymentLink(message, sender, flow) {
     return { ok: false, reason: 'missing-pairing-code' };
   }
   try {
+    // 页面跳转很快时，订单阶段的首次回传可能超时；在付款链接前再同步一次。
+    await forwardStage('orderSubmitted', sender, flow);
     const response = await fetch(BRIDGE_URL, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apwBridgeToken}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ url: message.url, kind: message.kind }),
+      body: JSON.stringify({
+        url: message.url, kind: message.kind,
+        partNumber: flow.partNumber, storeNumber: flow.storeNumber,
+      }),
       signal: AbortSignal.timeout(5000),
+    });
+    return response.ok ? { ok: true } : { ok: false, reason: `bridge-http-${response.status}` };
+  } catch {
+    return { ok: false, reason: 'bridge-unreachable' };
+  }
+}
+
+async function forwardStage(stage, sender, flow) {
+  if (!flow || !(applePage(sender.url) ||
+    (stage === 'orderSubmitted' && flow.phase === 'order-submitted' && alipayPage(sender.url)))) {
+    return { ok: false, reason: 'no-active-checkout' };
+  }
+  const allowed = {
+    bag: ['bag'],
+    'bag-clicked': ['checkout'],
+    'guest-clicked': ['guest', 'profile', 'payment', 'review'],
+    'order-submitted': ['orderSubmitted'],
+  };
+  if (!allowed[flow.phase]?.includes(stage)) return { ok: false, reason: 'invalid-stage' };
+  const { apwBridgeToken } = await chrome.storage.local.get('apwBridgeToken');
+  if (!/^[a-f0-9]{32}$/i.test(apwBridgeToken || '')) {
+    return { ok: false, reason: 'missing-pairing-code' };
+  }
+  try {
+    const response = await fetch(STATUS_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apwBridgeToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ partNumber: flow.partNumber, storeNumber: flow.storeNumber, stage }),
+      signal: AbortSignal.timeout(1000),
     });
     return response.ok ? { ok: true } : { ok: false, reason: `bridge-http-${response.status}` };
   } catch {
@@ -94,10 +132,14 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       if (next !== message.phase) return null;
       const updated = { ...flow, phase: next };
       await chrome.storage.session.set({ [key]: updated });
+      if (next === 'order-submitted') await forwardStage('orderSubmitted', sender, updated);
       return updated;
     }
     if (message?.type === 'apw-payment-link') {
       return forwardPaymentLink(message, sender, flow);
+    }
+    if (message?.type === 'apw-task-stage') {
+      return forwardStage(message.stage, sender, flow);
     }
     return null;
   })().then(respond, () => respond(null));

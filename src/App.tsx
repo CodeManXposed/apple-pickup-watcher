@@ -74,6 +74,7 @@ import {
 } from "@/lib/store";
 import {
   type Availability,
+  type BotStatus,
   type Category,
   describeAdvice,
   describeAvailability,
@@ -95,6 +96,20 @@ const TONE_CLASS: Record<StatusTone, string> = {
   // 失败显示成「无货」，用户对着一个早已失效的程序空等了大半年。
   unknown: "bg-unknown/15 text-unknown border-unknown/40 font-medium",
   pending: "bg-transparent text-muted-foreground/60 border-dashed",
+};
+
+const BOT_STAGE_LABEL: Record<BotStatus["stage"], string> = {
+  starting: "正在启动独立浏览器",
+  launched: "已打开商品页",
+  bag: "已进入购物袋",
+  checkout: "正在进入结账",
+  guest: "已选择访客结账",
+  profile: "正在填写结账资料",
+  payment: "正在选择支付宝",
+  review: "等待核对并提交订单",
+  orderSubmitted: "已提交订单，等待支付宝链接",
+  paymentLink: "已收到支付宝付款链接",
+  failed: "浏览器启动失败，请查看日志",
 };
 
 function StatusBadge({ availability }: { availability: Availability }) {
@@ -962,11 +977,21 @@ export default function App() {
           </ScrollArea>
         </section>
 
+        {ui.botStatus && (
+          <section className="bg-card shrink-0 rounded-xl border p-4 shadow-xs" aria-live="polite">
+            <h2 className="font-semibold">自动结账进度</h2>
+            <p className="text-sm">{BOT_STAGE_LABEL[ui.botStatus.stage]}</p>
+            <p className="text-muted-foreground text-xs">
+              {ui.botStatus.partNumber} · 门店 {ui.botStatus.storeNumber} · {formatTime(ui.botStatus.updatedAt * 1000)}
+            </p>
+          </section>
+        )}
+
         {ui.paymentLink && (
           <section className="bg-card shrink-0 rounded-xl border p-4 shadow-xs">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
-                <h2 className="font-semibold">支付宝付款链接</h2>
+                <h2 className="font-semibold">最近收到的支付宝付款链接</h2>
                 <p className="text-muted-foreground text-xs">
                   {ui.paymentLink.kind === "qr" ? "二维码目标地址可能很快失效" : "支付宝收银台页面"}；付款前请核对商家与金额。
                 </p>

@@ -16,6 +16,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Category,
   CategoryOption,
+  BotStatus,
   Product,
   PaymentLink,
   Region,
@@ -32,6 +33,7 @@ import { assertNever, describeAvailability, isUntrusted } from "./types";
 const EVENT_CHANNEL = "watcher://event";
 const NOTICE_CHANNEL = "watcher://notice";
 const PAYMENT_CHANNEL = "watcher://payment-link";
+const BOT_STATUS_CHANNEL = "watcher://bot-status";
 const MAX_LOG_LINES = 300;
 
 export interface UiState {
@@ -46,6 +48,7 @@ export interface UiState {
   pacing: { nextCheckInSecs: number; paced: boolean } | null;
   logs: string[];
   paymentLink: PaymentLink | null;
+  botStatus: BotStatus | null;
   regions: Region[];
   categories: CategoryOption[];
   stores: Store[];
@@ -88,6 +91,7 @@ let state: UiState = {
   pacing: null,
   logs: [],
   paymentLink: null,
+  botStatus: null,
   regions: [],
   categories: [],
   stores: [],
@@ -189,6 +193,7 @@ function applyEvent(event: WatcherEvent): void {
 let unlisteners: UnlistenFn[] = [];
 let starting: Promise<void> | null = null;
 let paymentEventSerial = 0;
+let botStatusEventSerial = 0;
 
 /**
  * 连接后端。重复调用是安全的。
@@ -209,20 +214,27 @@ export function connect(): Promise<void> {
         update({ paymentLink: e.payload });
         pushLog("已收到支付宝付款链接，请核对商家与金额。");
       }),
+      listen<BotStatus>(BOT_STATUS_CHANNEL, (e) => {
+        botStatusEventSerial += 1;
+        update({ botStatus: e.payload });
+      }),
     ]);
 
-    const serialAtLoad = paymentEventSerial;
-    const [regions, categories, settings, rows, running, paymentLink] = await Promise.all([
+    const paymentSerialAtLoad = paymentEventSerial;
+    const statusSerialAtLoad = botStatusEventSerial;
+    const [regions, categories, settings, rows, running, paymentLink, botStatus] = await Promise.all([
       invoke<Region[]>("list_regions"),
       invoke<CategoryOption[]>("list_categories"),
       invoke<Settings>("get_settings"),
       invoke<TargetState[]>("get_snapshot"),
       invoke<boolean>("is_running"),
       invoke<PaymentLink | null>("get_payment_link"),
+      invoke<BotStatus | null>("get_bot_status"),
     ]);
     update({
       regions, categories, settings, rows, running,
-      paymentLink: paymentEventSerial === serialAtLoad ? paymentLink : state.paymentLink,
+      paymentLink: paymentEventSerial === paymentSerialAtLoad ? paymentLink : state.paymentLink,
+      botStatus: botStatusEventSerial === statusSerialAtLoad ? botStatus : state.botStatus,
       ready: true,
     });
     await loadCatalog(settings.locale);

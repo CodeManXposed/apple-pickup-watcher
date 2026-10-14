@@ -163,6 +163,11 @@ fn get_payment_link(bridge: tauri::State<'_, PaymentBridge>) -> Option<PaymentLi
 }
 
 #[tauri::command]
+fn get_bot_status(bridge: tauri::State<'_, PaymentBridge>) -> Option<payment_bridge::BotStatus> {
+    bridge.status()
+}
+
+#[tauri::command]
 fn open_extension_folder(app: AppHandle) -> Result<(), String> {
     use tauri::path::BaseDirectory;
     use tauri_plugin_opener::OpenerExt;
@@ -481,7 +486,19 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
                     true,
                     &target.locale,
                     Some((target.part_number.as_str(), target.store_number.as_str())),
-                    |url| browser_bot::open_task(&app, url),
+                    |url| {
+                        let bridge = app.state::<PaymentBridge>();
+                        let status = bridge.start_task(&target.part_number, &target.store_number);
+                        let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
+                        let result = browser_bot::open_task(&app, url);
+                        let stage = if result.is_ok() { "launched" } else { "failed" };
+                        if let Some(status) =
+                            bridge.advance_task(stage, &target.part_number, &target.store_number)
+                        {
+                            let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
+                        }
+                        result
+                    },
                 )
             } else {
                 auto_open_bag.open_if_needed(
@@ -709,6 +726,7 @@ pub fn run() {
             get_settings,
             get_bridge_pairing_code,
             get_payment_link,
+            get_bot_status,
             open_extension_folder,
             prepare_bot_browser,
             open_bot_browser,

@@ -1,4 +1,4 @@
-//! Chrome 扩展到桌面应用的本机桥接，只接收已验证的支付宝链接。
+//! 浏览器扩展到桌面应用的本机桥接，接收任务阶段和已验证的支付宝链接。
 //! 监听回环地址，配对码保存在应用配置目录；不接收姓名、地址或付款凭据。
 
 use std::fs::{self, OpenOptions};
@@ -19,6 +19,7 @@ use crate::{AppState, NOTICE_CHANNEL};
 
 pub const PORT: u16 = 43849;
 pub const EVENT_CHANNEL: &str = "watcher://payment-link";
+pub const STATUS_CHANNEL: &str = "watcher://bot-status";
 const TOKEN_FILE: &str = "extension-pairing-code";
 const MAX_HEADER: usize = 16 << 10;
 const MAX_BODY: usize = 8 << 10;
@@ -33,14 +34,35 @@ pub struct PaymentLink {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct IncomingLink {
     url: String,
     kind: String,
+    part_number: Option<String>,
+    store_number: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotStatus {
+    pub part_number: String,
+    pub store_number: String,
+    pub stage: String,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IncomingStatus {
+    part_number: String,
+    store_number: String,
+    stage: String,
 }
 
 pub struct PaymentBridge {
     token: Option<String>,
     latest: RwLock<Option<PaymentLink>>,
+    status: RwLock<Option<BotStatus>>,
 }
 
 impl PaymentBridge {
@@ -48,6 +70,7 @@ impl PaymentBridge {
         Self {
             token: None,
             latest: RwLock::new(None),
+            status: RwLock::new(None),
         }
     }
 
@@ -62,6 +85,49 @@ impl PaymentBridge {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    pub fn status(&self) -> Option<BotStatus> {
+        self.status
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn start_task(&self, part_number: &str, store_number: &str) -> BotStatus {
+        let status = BotStatus {
+            part_number: part_number.to_owned(),
+            store_number: store_number.to_owned(),
+            stage: "starting".into(),
+            updated_at: now(),
+        };
+        *self.status.write().unwrap_or_else(|e| e.into_inner()) = Some(status.clone());
+        status
+    }
+
+    pub fn advance_task(
+        &self,
+        stage: &str,
+        part_number: &str,
+        store_number: &str,
+    ) -> Option<BotStatus> {
+        let next_rank = stage_rank(stage)?;
+        let mut current = self.status.write().unwrap_or_else(|e| e.into_inner());
+        let previous = current.as_ref()?;
+        if previous.part_number != part_number
+            || previous.store_number != store_number
+            || stage_rank(&previous.stage).is_none_or(|rank| rank >= next_rank)
+        {
+            return None;
+        }
+        let next = BotStatus {
+            part_number: part_number.to_owned(),
+            store_number: store_number.to_owned(),
+            stage: stage.to_owned(),
+            updated_at: now(),
+        };
+        *current = Some(next.clone());
+        Some(next)
     }
 
     fn record(&self, link: PaymentLink) -> bool {
@@ -119,9 +185,34 @@ pub fn prepare(app: &AppHandle) -> Result<(PaymentBridge, std::net::TcpListener)
         PaymentBridge {
             token: Some(token),
             latest: RwLock::new(None),
+            status: RwLock::new(None),
         },
         listener,
     ))
+}
+
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn stage_rank(stage: &str) -> Option<u8> {
+    Some(match stage {
+        "starting" => 0,
+        "launched" => 1,
+        "bag" => 2,
+        "checkout" => 3,
+        "guest" => 4,
+        "profile" => 5,
+        "payment" => 6,
+        "review" => 7,
+        "orderSubmitted" => 8,
+        "paymentLink" => 9,
+        "failed" => 10,
+        _ => return None,
+    })
 }
 
 pub async fn serve(app: AppHandle, listener: std::net::TcpListener) {
@@ -245,6 +336,7 @@ async fn respond(socket: &mut TcpStream, status: u16, origin: &str, body: &str) 
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
+        409 => "Conflict",
         408 => "Request Timeout",
         413 => "Payload Too Large",
         431 => "Request Header Fields Too Large",
@@ -277,11 +369,14 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
         respond(&mut socket, 400, "", "{}").await;
         return;
     };
-    if request_line == "OPTIONS /payment-link" {
+    if matches!(
+        request_line,
+        "OPTIONS /payment-link" | "OPTIONS /task-status"
+    ) {
         respond(&mut socket, 204, origin, "").await;
         return;
     }
-    if request_line != "POST /payment-link" {
+    if !matches!(request_line, "POST /payment-link" | "POST /task-status") {
         respond(&mut socket, 404, origin, "{}").await;
         return;
     }
@@ -294,12 +389,37 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
         respond(&mut socket, 401, origin, "{}").await;
         return;
     }
+    if request_line == "POST /task-status" {
+        let Ok(incoming) = serde_json::from_slice::<IncomingStatus>(&body) else {
+            respond(&mut socket, 400, origin, "{}").await;
+            return;
+        };
+        if !valid_task_status(&incoming) {
+            respond(&mut socket, 400, origin, "{}").await;
+            return;
+        }
+        let Some(status) = bridge.advance_task(
+            &incoming.stage,
+            &incoming.part_number,
+            &incoming.store_number,
+        ) else {
+            respond(&mut socket, 409, origin, "{}").await;
+            return;
+        };
+        respond(&mut socket, 200, origin, "{\"ok\":true}").await;
+        let _ = app.emit(STATUS_CHANNEL, status);
+        return;
+    }
     let Ok(incoming) = serde_json::from_slice::<IncomingLink>(&body) else {
         respond(&mut socket, 400, origin, "{}").await;
         return;
     };
     if !matches!(incoming.kind.as_str(), "qr" | "cashier") || !valid_alipay_url(&incoming.url) {
         respond(&mut socket, 400, origin, "{}").await;
+        return;
+    }
+    if !link_matches_task(&incoming, bridge.status().as_ref()) {
+        respond(&mut socket, 409, origin, "{}").await;
         return;
     }
     let link = PaymentLink {
@@ -311,11 +431,47 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
             .as_secs(),
     };
     let fresh = bridge.record(link.clone());
+    let advanced = bridge.status().and_then(|status| {
+        bridge.advance_task("paymentLink", &status.part_number, &status.store_number)
+    });
     respond(&mut socket, 200, origin, "{\"ok\":true}").await;
+    if let Some(status) = advanced {
+        let _ = app.emit(STATUS_CHANNEL, status);
+    }
     if fresh {
         let _ = app.emit(EVENT_CHANNEL, &link);
         tauri::async_runtime::spawn(send_discord(app, link));
     }
+}
+
+fn valid_task_status(status: &IncomingStatus) -> bool {
+    matches!(
+        status.stage.as_str(),
+        "bag" | "checkout" | "guest" | "profile" | "payment" | "review" | "orderSubmitted"
+    ) && (2..=10).contains(&status.store_number.len())
+        && status
+            .store_number
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        && status
+            .part_number
+            .split_once('/')
+            .is_some_and(|(part, suffix)| {
+                (4..=20).contains(&part.len())
+                    && part
+                        .bytes()
+                        .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+                    && suffix.len() == 1
+                    && suffix.bytes().all(|byte| byte.is_ascii_uppercase())
+            })
+}
+
+fn link_matches_task(link: &IncomingLink, status: Option<&BotStatus>) -> bool {
+    status.is_none_or(|status| {
+        link.part_number.as_deref() == Some(status.part_number.as_str())
+            && link.store_number.as_deref() == Some(status.store_number.as_str())
+            && matches!(status.stage.as_str(), "orderSubmitted" | "paymentLink")
+    })
 }
 
 async fn send_discord(app: AppHandle, link: PaymentLink) {
@@ -349,7 +505,10 @@ async fn send_discord(app: AppHandle, link: PaymentLink) {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_request, respond, valid_alipay_url, valid_origin};
+    use super::{
+        IncomingLink, IncomingStatus, PaymentBridge, link_matches_task, read_request, respond,
+        valid_alipay_url, valid_origin, valid_task_status,
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
@@ -369,6 +528,52 @@ mod tests {
         assert!(!valid_alipay_url(
             "https://user:password@qr.alipay.com/abc123"
         ));
+    }
+
+    #[test]
+    fn task_status_follows_one_target_and_never_moves_backward() {
+        let bridge = PaymentBridge::disabled();
+        bridge.start_task("MJYE4CH/A", "R683");
+        assert!(bridge.advance_task("bag", "MJYE4CH/A", "R683").is_some());
+        assert!(bridge.advance_task("guest", "MJYE4CH/A", "R683").is_some());
+        assert!(
+            bridge
+                .advance_task("checkout", "MJYE4CH/A", "R683")
+                .is_none()
+        );
+        assert!(
+            bridge
+                .advance_task("payment", "MJYE4CH/A", "R999")
+                .is_none()
+        );
+        assert_eq!(bridge.status().unwrap().stage, "guest");
+        assert!(valid_task_status(&IncomingStatus {
+            part_number: "MJYE4CH/A".into(),
+            store_number: "R683".into(),
+            stage: "profile".into(),
+        }));
+        assert!(!valid_task_status(&IncomingStatus {
+            part_number: "../bag".into(),
+            store_number: "R683".into(),
+            stage: "profile".into(),
+        }));
+    }
+
+    #[test]
+    fn payment_link_cannot_complete_another_active_task() {
+        let bridge = PaymentBridge::disabled();
+        bridge.start_task("MJYE4CH/A", "R683");
+        let link = IncomingLink {
+            url: "https://qr.alipay.com/abc123".into(),
+            kind: "qr".into(),
+            part_number: Some("MJYE4CH/A".into()),
+            store_number: Some("R683".into()),
+        };
+        assert!(!link_matches_task(&link, bridge.status().as_ref()));
+        bridge.advance_task("orderSubmitted", "MJYE4CH/A", "R683");
+        assert!(link_matches_task(&link, bridge.status().as_ref()));
+        bridge.start_task("MJYE4CH/A", "R999");
+        assert!(!link_matches_task(&link, bridge.status().as_ref()));
     }
 
     #[tokio::test]

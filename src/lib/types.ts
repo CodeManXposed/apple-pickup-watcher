@@ -89,17 +89,26 @@ export interface Settings {
   discordWebhook: string;
   soundEnabled: boolean;
   openBagOnHit: boolean;
-  /** 使用配套 Chrome 扩展，在首个到货目标的商品页尝试加入购物袋。 */
+  /** 使用独立 Chrome for Testing 会话和配套扩展，在首个到货目标的商品页尝试加入购物袋。 */
   autoAddToBag: boolean;
   /** 代理地址列表；每个代理是一条额外的出口线路，被拦时切换。可为空。 */
   proxies: string[];
 }
 
-/** 当前 Chrome 结账流程得到的支付宝地址，由本机桥接推送。 */
+/** 最近一次浏览器结账流程得到的支付宝地址，由本机桥接推送。 */
 export interface PaymentLink {
   url: string;
   kind: "qr" | "cashier";
   receivedAt: number;
+}
+
+/** 独立浏览器中当前任务的进度，由本机桥接推送。 */
+export interface BotStatus {
+  partNumber: string;
+  storeNumber: string;
+  stage: "starting" | "launched" | "bag" | "checkout" | "guest" | "profile" |
+    "payment" | "review" | "orderSubmitted" | "paymentLink" | "failed";
+  updatedAt: number;
 }
 
 /** 监控目标的唯一键，与 Rust 侧 Target::key 的构成保持一致。 */

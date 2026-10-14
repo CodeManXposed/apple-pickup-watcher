@@ -15,6 +15,7 @@
   let orderNoted = false;
   let begun = false;
   const requestedContacts = new WeakSet();
+  const reportedStages = new Set();
   const startedAt = Date.now();
 
   function shown(element) {
@@ -45,6 +46,12 @@
     }
     box.textContent = message;
     box.style.background = failed ? '#8b1e1e' : '#1d1d1f';
+  }
+
+  function reportStage(stage) {
+    if (reportedStages.has(stage)) return;
+    reportedStages.add(stage);
+    void chrome.runtime.sendMessage({ type: 'apw-task-stage', stage }).catch(() => {});
   }
 
   function checkoutButton() {
@@ -156,16 +163,19 @@
     }
     const pickupContinue = firstShown('.rs-pickup-button button');
     if (pickupContinue) {
+      reportStage('profile');
       if (contactReady(pickupContinue)) clickOnce(`pickup-contact:${contactFingerprint()}`, pickupContinue, '正在继续到付款方式…');
       return;
     }
     const shippingContinue = firstShown('[data-autom="shipping-continue-button"]');
     if (shippingContinue) {
+      reportStage('profile');
       if (contactReady(shippingContinue)) clickOnce(`shipping:${contactFingerprint()}`, shippingContinue, '正在继续到付款方式…');
       return;
     }
     const paymentContinue = firstShown('[data-autom="continue-button-review"]');
     if (paymentContinue) {
+      reportStage('payment');
       const alipay = alipayRadio();
       if (!alipay) {
         notice('未能确认支付宝选项，请在 Apple 页面自行选择付款方式。');
@@ -179,7 +189,10 @@
       return;
     }
     const placeOrder = firstShown('[data-autom="continue-button-placeOrder"]');
-    if (placeOrder) notice('请核对商品、门店、金额及资料；点击“现在下订单”后 Apple 才会跳转支付宝。');
+    if (placeOrder) {
+      reportStage('review');
+      notice('请核对商品、门店、金额及资料；点击“现在下订单”后 Apple 才会跳转支付宝。');
+    }
   }
 
   async function act() {
@@ -198,6 +211,7 @@
       const started = await chrome.runtime.sendMessage({ type: 'apw-begin-checkout', storeNumber, partNumber });
       if (!started) { done = true; return; }
       begun = true;
+      reportStage('bag');
       history.replaceState(history.state, '', location.pathname + location.search);
       notice('已确认目标商品，正在查找结账按钮…');
     }
@@ -208,6 +222,7 @@
       if (button) {
         const updated = await chrome.runtime.sendMessage({ type: 'apw-checkout-step', phase: 'bag-clicked' });
         if (!updated) return;
+        reportStage('checkout');
         done = true;
         notice('正在进入 Apple 结账…');
         button.click();
@@ -224,6 +239,7 @@
       if (button) {
         const updated = await chrome.runtime.sendMessage({ type: 'apw-checkout-step', phase: 'guest-clicked' });
         if (!updated) return;
+        reportStage('guest');
         done = true;
         notice('正在以访客身份结账；若 Apple 显示隐私同意书，请自行阅读并决定。');
         button.click();
