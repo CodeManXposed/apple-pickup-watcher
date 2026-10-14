@@ -1,5 +1,6 @@
 const STORAGE_KEY = 'apwCheckoutProfile';
 const BRIDGE_KEY = 'apwBridgeToken';
+const PAIRING_URL = 'http://127.0.0.1:43849/pairing-check';
 const FIELDS = {
   pickup: ['familyName', 'givenName', 'fullName', 'phone', 'email'],
   delivery: [
@@ -10,6 +11,22 @@ const FIELDS = {
 
 const form = document.getElementById('profile-form');
 const status = document.getElementById('status');
+
+async function checkBridge(token) {
+  if (!/^[a-f0-9]{32}$/i.test(token)) return '连接码格式不正确，请复制桌面应用中的连接码。';
+  try {
+    const response = await fetch(PAIRING_URL, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (response.ok) return '已连接桌面应用。';
+    if (response.status === 401) return '连接码不匹配，请重新从桌面应用复制。';
+    return `桌面应用连接失败（HTTP ${response.status}）。`;
+  } catch {
+    return '无法连接桌面应用，请确认应用正在运行。';
+  }
+}
 
 chrome.storage.local.get([STORAGE_KEY, BRIDGE_KEY]).then((result) => {
   const saved = result[STORAGE_KEY];
@@ -33,11 +50,12 @@ form.addEventListener('submit', async (event) => {
     }
   }
   try {
+    const token = form.elements.namedItem('bridgeToken').value.trim();
     await chrome.storage.local.set({
       [STORAGE_KEY]: saved,
-      [BRIDGE_KEY]: form.elements.namedItem('bridgeToken').value.trim(),
+      [BRIDGE_KEY]: token,
     });
-    status.textContent = '已保存。';
+    status.textContent = `资料已保存。${await checkBridge(token)}`;
   } catch {
     status.textContent = '保存失败，请重试。';
   }

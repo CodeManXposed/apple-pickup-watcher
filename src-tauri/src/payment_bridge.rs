@@ -383,12 +383,15 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
     };
     if matches!(
         request_line,
-        "OPTIONS /payment-link" | "OPTIONS /task-status"
+        "OPTIONS /payment-link" | "OPTIONS /task-status" | "OPTIONS /pairing-check"
     ) {
         respond(&mut socket, 204, origin, "").await;
         return;
     }
-    if !matches!(request_line, "POST /payment-link" | "POST /task-status") {
+    if !matches!(
+        request_line,
+        "POST /payment-link" | "POST /task-status" | "POST /pairing-check"
+    ) {
         respond(&mut socket, 404, origin, "{}").await;
         return;
     }
@@ -399,6 +402,10 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
     };
     if authorization != format!("Bearer {pairing_code}") {
         respond(&mut socket, 401, origin, "{}").await;
+        return;
+    }
+    if request_line == "POST /pairing-check" {
+        respond(&mut socket, 200, origin, "{\"ok\":true}").await;
         return;
     }
     if request_line == "POST /task-status" {
