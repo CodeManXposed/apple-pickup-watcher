@@ -722,6 +722,11 @@ fn load_settings(notices: &mut Vec<String>) -> (Settings, Option<SettingsStore>)
 
 pub fn run() {
     tauri::Builder::default()
+        // 扩展桥接使用固定回环端口；只允许一个桌面实例持有它。再次打开时
+        // 显示已有窗口，也避免两份后台监控同时查询和发送到货通知。
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            reveal_window(app)
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
