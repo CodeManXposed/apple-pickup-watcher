@@ -31,6 +31,59 @@ mod payment_bridge;
 use auto_open::AutoOpenBag;
 use payment_bridge::{PaymentBridge, PaymentLink};
 
+fn browser_task_url(
+    base: &str,
+    task_id: &str,
+    product_name: &str,
+    checkout_area: Option<(&str, &str, &str)>,
+) -> Result<reqwest::Url, String> {
+    let mut task_url = reqwest::Url::parse(base).map_err(|err| err.to_string())?;
+    let mut pairs = vec![("apw-task", task_id), ("apw-product", product_name)];
+    if let Some((province, city, district)) = checkout_area {
+        pairs.extend([
+            ("apw-province", province),
+            ("apw-city", city),
+            ("apw-district", district),
+        ]);
+    }
+    let encoded = reqwest::Url::parse_with_params("https://localhost/", &pairs)
+        .map_err(|err| err.to_string())?;
+    let fragment = format!(
+        "{}&{}",
+        task_url.fragment().unwrap_or_default(),
+        encoded.query().unwrap_or_default()
+    );
+    task_url.set_fragment(Some(&fragment));
+    Ok(task_url)
+}
+
+#[cfg(test)]
+mod browser_task_url_tests {
+    use super::browser_task_url;
+
+    #[test]
+    fn product_and_area_survive_fragment_parameter_encoding() {
+        let task = browser_task_url(
+            "https://www.apple.com.cn/shop/pdpAddToBag/MJYE4CH/A#apw-auto-add=MJYE4CH%2FA&apw-store=R683",
+            &"a".repeat(32),
+            "iPhone 18 Pro 256GB 黑色 & 蓝色 + 50%",
+            Some(("上海", "上海", "浦东新区 & 附近")),
+        )
+        .unwrap();
+        let fragment = task.fragment().unwrap();
+        let decoded = reqwest::Url::parse(&format!("https://localhost/?{fragment}")).unwrap();
+        let pairs: std::collections::HashMap<_, _> = decoded.query_pairs().into_owned().collect();
+        assert_eq!(pairs.get("apw-auto-add").unwrap(), "MJYE4CH/A");
+        assert_eq!(pairs.get("apw-store").unwrap(), "R683");
+        assert_eq!(pairs.get("apw-task").unwrap(), &"a".repeat(32));
+        assert_eq!(
+            pairs.get("apw-product").unwrap(),
+            "iPhone 18 Pro 256GB 黑色 & 蓝色 + 50%"
+        );
+        assert_eq!(pairs.get("apw-district").unwrap(), "浦东新区 & 附近");
+    }
+}
+
 /// 前端事件通道名。前端用 `listen("watcher://event", ...)` 订阅。
 const EVENT_CHANNEL: &str = "watcher://event";
 /// 启动过程中的降级说明通道：配置读不出来之类的事必须让用户看见。
@@ -503,26 +556,14 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
                         let status = bridge.start_task(&target.part_number, &target.store_number);
                         let task_id = status.task_id.clone();
                         let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
-                        let mut task_url = reqwest::Url::parse(&format!("{url}&apw-task={task_id}"))
-                            .map_err(|err| err.to_string())?;
-                        let product_param = reqwest::Url::parse_with_params(
-                            "https://localhost/",
-                            &[("apw-product", target.product_name.as_str())],
-                        )
-                        .map_err(|err| err.to_string())?;
-                        let fragment = format!(
-                            "{}&{}",
-                            task_url.fragment().unwrap_or_default(),
-                            product_param.query().unwrap_or_default()
-                        );
-                        task_url.set_fragment(Some(&fragment));
-                        if let Some((province, city, district)) = &checkout_area {
-                            let fragment = format!(
-                                "{}&apw-province={province}&apw-city={city}&apw-district={district}",
-                                task_url.fragment().unwrap_or_default()
-                            );
-                            task_url.set_fragment(Some(&fragment));
-                        }
+                        let task_url = browser_task_url(
+                            url,
+                            &task_id,
+                            &target.product_name,
+                            checkout_area.as_ref().map(|(province, city, district)| {
+                                (province.as_str(), city.as_str(), district.as_str())
+                            }),
+                        )?;
                         let result = browser_bot::open_task(&app, task_url.as_str());
                         let stage = if result.is_ok() { "launched" } else { "failed" };
                         if let Some(status) = bridge.advance_task(

@@ -93,7 +93,7 @@ pub(crate) fn ready(app: &AppHandle) -> Result<BrowserReady, String> {
     let root = root(app)?;
     current(&root, platform)
         .map(|(version, _)| BrowserReady { version })
-        .ok_or_else(|| "请先在运行设置中准备独立浏览器".into())
+        .ok_or_else(|| "请先在 Profile 页准备独立浏览器".into())
 }
 
 fn valid_version(version: &str) -> bool {
@@ -255,7 +255,7 @@ fn launch(app: &AppHandle, url: &str) -> Result<(), String> {
     let platform = platform()?;
     let root = root(app)?;
     let (_, binary) =
-        current(&root, platform).ok_or_else(|| "请先在运行设置中准备独立浏览器".to_owned())?;
+        current(&root, platform).ok_or_else(|| "请先在 Profile 页准备独立浏览器".to_owned())?;
     let extension = app
         .path()
         .resolve("browser-extension", BaseDirectory::Resource)

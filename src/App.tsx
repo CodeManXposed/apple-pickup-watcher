@@ -5,11 +5,14 @@ import {
   ChevronDown,
   ChevronUp,
   Download,
+  ListTodo,
   Pause,
   Play,
   Plus,
+  Radar,
   RefreshCw,
   Trash2,
+  UserRound,
   X,
 } from "lucide-react";
 
@@ -189,6 +192,18 @@ function Panel({
 }
 
 const SETTINGS_OPEN_KEY = "apw.settingsOpen";
+const WORKSPACE_TAB_KEY = "apw.workspaceTab";
+type WorkspaceTab = "monitor" | "profile" | "tasks";
+
+function readWorkspaceTab(): WorkspaceTab {
+  try {
+    const tab = localStorage.getItem(WORKSPACE_TAB_KEY);
+    if (tab === "monitor" || tab === "profile" || tab === "tasks") return tab;
+  } catch {
+    // 本地存储不可用时仍能切换分页。
+  }
+  return "monitor";
+}
 
 /** 上次是展开还是收起。读不到（首次启动、无 localStorage）按展开。 */
 function readSettingsOpen(): boolean {
@@ -275,6 +290,16 @@ function LogLine({ line }: { line: string }) {
 
 export default function App() {
   const ui = useSyncExternalStore(watcherStore.subscribe, watcherStore.getSnapshot);
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>(readWorkspaceTab());
+
+  function selectTab(tab: WorkspaceTab) {
+    setActiveTab(tab);
+    try {
+      localStorage.setItem(WORKSPACE_TAB_KEY, tab);
+    } catch {
+      // 分页选择在当前窗口仍然有效。
+    }
+  }
 
   useEffect(() => {
     void connect();
@@ -486,6 +511,36 @@ export default function App() {
           </div>
         </header>
 
+        <nav aria-label="工作区" className="bg-muted/70 flex w-fit max-w-full gap-1 rounded-xl border p-1" role="tablist">
+          {([
+            ["monitor", "监控", Radar],
+            ["profile", "Profile", UserRound],
+            ["tasks", "任务", ListTodo],
+          ] as const).map(([tab, label, Icon]) => (
+            <button
+              key={tab}
+              type="button"
+              id={`workspace-tab-${tab}`}
+              role="tab"
+              aria-controls={`workspace-panel-${tab}`}
+              aria-selected={activeTab === tab}
+              onClick={() => selectTab(tab)}
+              className={cn(
+                "flex min-w-30 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2",
+                activeTab === tab
+                  ? "bg-card text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground hover:bg-card/60",
+              )}
+            >
+              <Icon className="size-4" aria-hidden="true" />
+              {label}
+              {tab === "monitor" && ui.rows.length > 0 && (
+                <span className="text-muted-foreground text-xs tabular-nums">{ui.rows.length}</span>
+              )}
+            </button>
+          ))}
+        </nav>
+
         {ui.trouble !== null && (
           // 只有标题是红的。原因和建议各占一行、用正常的字色：三段红字堆在一起，
           // 用户反而分不清哪句是原因、哪句是该做的事。
@@ -532,6 +587,13 @@ export default function App() {
           </div>
         )}
 
+        {activeTab === "monitor" && (
+        <main
+          id="workspace-panel-monitor"
+          role="tabpanel"
+          aria-labelledby="workspace-tab-monitor"
+          className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto"
+        >
         <Panel
           title="添加监控目标"
           hint="不同品类、不同门店可以混着加；门店和 iPhone 的机型、容量、颜色都可多选，组合一次全部加入"
@@ -799,31 +861,6 @@ export default function App() {
                   />
                   <Label htmlFor="openbag">有货时打开购物袋</Label>
                 </div>
-                <div className="flex w-full flex-wrap items-center gap-2">
-                  <Switch
-                    id="autoadd"
-                    checked={ui.settings.autoAddToBag}
-                    onCheckedChange={(v) =>
-                      void saveSettings({ ...ui.settings, autoAddToBag: v })
-                    }
-                  />
-                  <Label htmlFor="autoadd">有货时在独立浏览器自动加车</Label>
-                  <span className="text-muted-foreground text-xs">
-                    先准备专用浏览器，再在其中的扩展设置结账资料
-                  </span>
-                  <Button variant="outline" size="sm" onClick={() => void prepareBotBrowser()}>
-                    准备独立浏览器
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={() => void openBotBrowser()}>
-                    打开独立浏览器
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={() => void openExtensionFolder()}>
-                    查看扩展目录
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={() => void copyBridgePairingCode()}>
-                    复制扩展连接码
-                  </Button>
-                </div>
               </div>
             </div>
 
@@ -920,7 +957,7 @@ export default function App() {
           )}
         </div>
 
-        <section className="bg-card min-h-0 flex-1 overflow-hidden rounded-xl border shadow-xs">
+        <section className="bg-card min-h-72 flex-1 overflow-hidden rounded-xl border shadow-xs">
           <ScrollArea className="h-full">
             <Table>
               <TableHeader>
@@ -979,9 +1016,121 @@ export default function App() {
           </ScrollArea>
         </section>
 
+        </main>
+        )}
+
+        {activeTab === "profile" && (
+          <main
+            id="workspace-panel-profile"
+            role="tabpanel"
+            aria-labelledby="workspace-tab-profile"
+            className="min-h-0 flex-1 overflow-y-auto"
+          >
+            <div className="grid gap-4 pb-5 md:grid-cols-2">
+              <section className="bg-card rounded-xl border p-5 shadow-xs md:col-span-2">
+                <h2 className="text-lg font-semibold">结账 Profile</h2>
+                <p className="text-muted-foreground mt-1 text-sm">
+                  取货人和配送资料保存在独立 Chrome 的扩展中。在扩展的「结账资料设置」里编辑，资料不会写入桌面应用的监控配置。
+                </p>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <Button onClick={() => void prepareBotBrowser()}>准备独立浏览器</Button>
+                  <Button variant="secondary" onClick={() => void openBotBrowser()}>打开独立浏览器</Button>
+                  <Button variant="outline" onClick={() => void copyBridgePairingCode()}>复制扩展连接码</Button>
+                  <Button variant="ghost" onClick={() => void openExtensionFolder()}>查看扩展目录</Button>
+                </div>
+                <p className="text-muted-foreground mt-3 text-xs">
+                  打开独立浏览器后，点工具栏的 Apple Pickup Watcher 扩展图标，再打开「结账资料设置」；将桌面连接码粘贴到扩展并保存。
+                </p>
+              </section>
+
+              <section className="bg-card rounded-xl border p-5 shadow-xs">
+                <div className="flex items-center gap-2"><UserRound className="size-4" /><h2 className="font-semibold">取货联系人</h2></div>
+                <p className="text-muted-foreground mt-2 text-sm">
+                  在扩展中保存取货人的姓名、手机号和邮箱。姓名需与取货证件一致；Apple 要求的证件后四位和短信验证仍在浏览器页面处理。
+                </p>
+              </section>
+
+              <section className="bg-card rounded-xl border p-5 shadow-xs">
+                <div className="flex items-center gap-2"><UserRound className="size-4" /><h2 className="font-semibold">配送收货资料</h2></div>
+                <p className="text-muted-foreground mt-2 text-sm">
+                  在同一扩展设置页分别保存配送联系人、地址和邮编。扩展只填写可识别的空白字段；无法确认的下拉选项需在 Apple 页面选择。
+                </p>
+              </section>
+
+              <section className="bg-card rounded-xl border p-5 shadow-xs md:col-span-2">
+                <h2 className="font-semibold">自动提交订单</h2>
+                <p className="text-muted-foreground mt-2 text-sm">
+                  自动下单开关和人民币单笔金额上限也在扩展设置页，默认关闭。启用后，扩展在结账过程中确认门店和支付宝，并在最终订单页核对商品、数量及金额；付款仍由你完成。
+                </p>
+              </section>
+            </div>
+          </main>
+        )}
+
+        {activeTab === "tasks" && (
+          <main
+            id="workspace-panel-tasks"
+            role="tabpanel"
+            aria-labelledby="workspace-tab-tasks"
+            className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto"
+          >
+            <section className="bg-card rounded-xl border p-4 shadow-xs">
+              <div className="flex flex-wrap items-center gap-3">
+                <Switch
+                  id="autoadd"
+                  checked={ui.settings.autoAddToBag}
+                  onCheckedChange={(value) => void saveSettings({ ...ui.settings, autoAddToBag: value })}
+                />
+                <Label htmlFor="autoadd" className="font-medium">有货时启动自动加车任务</Label>
+                <Button variant="outline" size="sm" className="ml-auto" onClick={() => selectTab("profile")}>设置 Profile</Button>
+              </div>
+              <p className="text-muted-foreground mt-2 text-sm">
+                每次开始监控后，最多为首个有货目标启动一项独立浏览器任务；其他目标继续监控并提醒。结账资料和自动下单上限在 Profile 页介绍的扩展设置中配置。
+              </p>
+            </section>
+
+            <section className="bg-card overflow-hidden rounded-xl border shadow-xs">
+              <div className="border-b px-4 py-3">
+                <h2 className="font-semibold">任务队列</h2>
+                <p className="text-muted-foreground text-xs">监控目标是候选任务；每次运行最多启动首个命中项。</p>
+              </div>
+              <ScrollArea className="max-h-64">
+                <Table>
+                  <TableHeader><TableRow>
+                    <TableHead className="pl-4">商品</TableHead>
+                    <TableHead>门店</TableHead>
+                    <TableHead>库存</TableHead>
+                    <TableHead>任务状态</TableHead>
+                  </TableRow></TableHeader>
+                  <TableBody>
+                    {ui.rows.length === 0 ? (
+                      <TableRow><TableCell colSpan={4} className="text-muted-foreground h-24 text-center">
+                        尚无任务候选。请到监控页添加目标。
+                      </TableCell></TableRow>
+                    ) : ui.rows.map((row) => {
+                      const current = ui.botStatus?.partNumber === row.target.partNumber &&
+                        ui.botStatus.storeNumber === row.target.storeNumber;
+                      const taskLabel = current && ui.botStatus
+                        ? `最近：${BOT_STAGE_LABEL[ui.botStatus.stage]}`
+                        : !ui.settings.autoAddToBag ? "自动加车未启用"
+                          : ui.botStatus ? "未启动浏览器任务" : "等待库存命中";
+                      return (
+                        <TableRow key={targetKey(row.target)}>
+                          <TableCell className="pl-4 font-medium">{row.target.productName}</TableCell>
+                          <TableCell>{row.target.storeTitle}</TableCell>
+                          <TableCell><StatusBadge availability={row.availability} /></TableCell>
+                          <TableCell className="text-muted-foreground text-xs">{taskLabel}</TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </ScrollArea>
+            </section>
+
         {ui.botStatus && (
           <section className="bg-card shrink-0 rounded-xl border p-4 shadow-xs" aria-live="polite">
-            <h2 className="font-semibold">自动结账进度</h2>
+            <h2 className="font-semibold">最近自动结账任务</h2>
             <p className="text-sm">{BOT_STAGE_LABEL[ui.botStatus.stage]}</p>
             <p className="text-muted-foreground text-xs">
               {ui.botStatus.partNumber} · 门店 {ui.botStatus.storeNumber} · {formatTime(ui.botStatus.updatedAt * 1000)}
@@ -1008,6 +1157,13 @@ export default function App() {
           </section>
         )}
 
+        {!ui.paymentLink && (
+          <section className="bg-card rounded-xl border p-4 shadow-xs">
+            <h2 className="font-semibold">支付宝付款链接</h2>
+            <p className="text-muted-foreground mt-1 text-sm">提交 Apple 订单并进入支付宝后，链接会显示在这里。</p>
+          </section>
+        )}
+
         <section className="bg-card h-28 shrink-0 overflow-hidden rounded-xl border shadow-xs">
           <ScrollArea className="h-full">
             <div className="p-3 font-mono text-xs leading-5 select-text">
@@ -1019,6 +1175,8 @@ export default function App() {
             </div>
           </ScrollArea>
         </section>
+          </main>
+        )}
       </div>
     </TooltipProvider>
   );

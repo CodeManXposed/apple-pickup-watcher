@@ -7,7 +7,7 @@ function renderApp() {
   const addedTargets = [];
   const pushSaves = [];
   const state = {
-    settings: { locale: "zh_CN", barkUrl: "https://api.day.app/saved-key", intervalSeconds: 30 },
+    settings: { locale: "zh_CN", barkUrl: "https://api.day.app/saved-key", intervalSeconds: 30, autoAddToBag: false },
     stores: [], products: [], rows: [], regions: [], categories: [], logs: [],
     category: "iphone", trouble: null, update: null,
   };
@@ -95,6 +95,11 @@ function renderApp() {
       Array.isArray(element.props.children) && element.props.children.includes(" 添加")),
     scaleHint: () => control((element) => element.type === "span" &&
       Array.isArray(element.props.children) && element.props.children.includes(" 个型号 × ")),
+    tab: (name) => control((element) => element?.props?.id === `workspace-tab-${name}`),
+    panelIds: () => all((element) => element?.props?.role === "tabpanel").map((element) => element.props.id),
+    taskSwitch: () => control((element) => element?.props?.id === "autoadd"),
+    taskRows: () => all((element) => element?.type === "TableRow").length,
+    profileSetupButton: () => control((element) => element?.type === "Button" && element.props.children === "准备独立浏览器"),
     state, saved, addedTargets, pushSaves,
   };
 }
@@ -103,6 +108,29 @@ const K1 = "https://api.day.app/k1";
 const K2 = "https://api.day.app/k2";
 const F1 = "https://open.feishu.cn/open-apis/bot/v2/hook/f1";
 const D1 = "https://discord.com/api/webhooks/123/token";
+
+test("monitor, Profile, and task pages keep their controls separate", () => {
+  const app = renderApp();
+  assert.deepEqual(app.panelIds(), ["workspace-panel-monitor"]);
+  assert.equal(app.tab("monitor")["aria-selected"], true);
+  assert.deepEqual(app.pushValues(), ["https://api.day.app/saved-key"]);
+
+  app.tab("profile").onClick();
+  assert.deepEqual(app.panelIds(), ["workspace-panel-profile"]);
+  assert.equal(app.tab("profile")["aria-selected"], true);
+  assert.equal(app.tab("monitor")["aria-selected"], false);
+  assert.equal(app.profileSetupButton().disabled, undefined);
+
+  app.tab("tasks").onClick();
+  assert.deepEqual(app.panelIds(), ["workspace-panel-tasks"]);
+  assert.equal(app.taskSwitch().checked, false);
+  app.taskSwitch().onCheckedChange(true);
+  assert.equal(app.saved.at(-1).autoAddToBag, true);
+
+  app.tab("monitor").onClick();
+  assert.deepEqual(app.panelIds(), ["workspace-panel-monitor"]);
+  assert.deepEqual(app.pushValues(), ["https://api.day.app/saved-key"]);
+});
 
 test("saved push addresses are one list with channel labels", () => {
   const app = renderApp();
