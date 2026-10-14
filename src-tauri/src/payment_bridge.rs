@@ -163,6 +163,7 @@ impl PaymentBridge {
             updated_at: now(),
         };
         *self.status.write().unwrap_or_else(|e| e.into_inner()) = Some(status.clone());
+        *self.latest.write().unwrap_or_else(|e| e.into_inner()) = None;
         status
     }
 
@@ -219,6 +220,15 @@ impl PaymentBridge {
         }
         *current = Some((link, task_id.map(str::to_owned)));
         true
+    }
+
+    fn record_current(&self, incoming: &IncomingLink, link: PaymentLink) -> Option<bool> {
+        // 持有状态读锁直到链接写入结束；新任务须等待它完成，然后清除旧链接。
+        let status = self.status.read().unwrap_or_else(|e| e.into_inner());
+        if !link_matches_task(incoming, status.as_ref()) {
+            return None;
+        }
+        Some(self.record(link, incoming.task_id.as_deref()))
     }
 }
 
@@ -568,23 +578,22 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
         respond(&mut socket, 400, origin, "{}").await;
         return;
     }
-    if !link_matches_task(&incoming, bridge.status().as_ref()) {
-        respond(&mut socket, 409, origin, "{}").await;
-        return;
-    }
     let link = PaymentLink {
-        url: incoming.url,
-        kind: incoming.kind,
+        url: incoming.url.clone(),
+        kind: incoming.kind.clone(),
         received_at: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
     };
-    let Some(task_id) = incoming.task_id else {
+    let Some(task_id) = incoming.task_id.clone() else {
         respond(&mut socket, 409, origin, "{}").await;
         return;
     };
-    let fresh = bridge.record(link.clone(), Some(&task_id));
+    let Some(fresh) = bridge.record_current(&incoming, link.clone()) else {
+        respond(&mut socket, 409, origin, "{}").await;
+        return;
+    };
     let advanced = bridge.status().and_then(|status| {
         bridge.advance_task(
             "paymentLink",
@@ -597,7 +606,7 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
     if let Some(status) = advanced {
         let _ = app.emit(STATUS_CHANNEL, status);
     }
-    if fresh {
+    if fresh && bridge.is_current_link(&link, &task_id) {
         let _ = app.emit(EVENT_CHANNEL, &link);
         tauri::async_runtime::spawn(send_discord(app, link, task_id));
     }
@@ -915,6 +924,32 @@ mod tests {
                 .is_none()
         );
         assert!(!link_matches_task(&link, bridge.status().as_ref()));
+    }
+
+    #[test]
+    fn starting_another_task_clears_its_predecessors_link_and_rejects_late_delivery() {
+        let bridge = PaymentBridge::disabled();
+        let old_id = bridge.start_task("MJYE4CH/A", "R683").task_id;
+        bridge.advance_task("orderSubmitted", "MJYE4CH/A", "R683", &old_id);
+        let incoming = IncomingLink {
+            url: "https://qr.alipay.com/old-order".into(),
+            kind: "qr".into(),
+            part_number: Some("MJYE4CH/A".into()),
+            store_number: Some("R683".into()),
+            task_id: Some(old_id),
+        };
+        let link = PaymentLink {
+            url: incoming.url.clone(),
+            kind: incoming.kind.clone(),
+            received_at: 1,
+        };
+        assert_eq!(bridge.record_current(&incoming, link.clone()), Some(true));
+        assert_eq!(bridge.latest().unwrap().url, link.url);
+
+        bridge.start_task("MG724CH/A", "R683");
+        assert!(bridge.latest().is_none());
+        assert_eq!(bridge.record_current(&incoming, link), None);
+        assert!(bridge.latest().is_none());
     }
 
     #[test]

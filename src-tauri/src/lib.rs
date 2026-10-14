@@ -513,6 +513,7 @@ fn open_auto_add(app: &AppHandle, gate: &mut AutoOpenBag, target: &Target) -> Re
             let bridge = app.state::<PaymentBridge>();
             let status = bridge.start_task(&target.part_number, &target.store_number);
             let task_id = status.task_id.clone();
+            let _ = app.emit(payment_bridge::EVENT_CHANNEL, Option::<PaymentLink>::None);
             let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
             let result = browser_task_url(
                 url,

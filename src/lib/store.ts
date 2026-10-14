@@ -209,14 +209,18 @@ export function connect(): Promise<void> {
       listen<WatcherEvent>(EVENT_CHANNEL, (e) => applyEvent(e.payload)),
       // 这条通道不只在启动时用：发提醒失败、打开购物袋失败也走这里，前缀不能写死成「启动」。
       listen<string>(NOTICE_CHANNEL, (e) => pushLog(`提示：${e.payload}`)),
-      listen<PaymentLink>(PAYMENT_CHANNEL, (e) => {
+      listen<PaymentLink | null>(PAYMENT_CHANNEL, (e) => {
         paymentEventSerial += 1;
+        if (e.payload === null) {
+          update({ paymentLink: null });
+          return;
+        }
         update({ paymentLink: e.payload });
         pushLog("已收到支付宝付款链接，请核对商家与金额。");
       }),
       listen<BotStatus>(BOT_STATUS_CHANNEL, (e) => {
         botStatusEventSerial += 1;
-        update({ botStatus: e.payload });
+        update({ botStatus: e.payload, ...(e.payload.stage === "starting" ? { paymentLink: null } : {}) });
       }),
     ]);
 

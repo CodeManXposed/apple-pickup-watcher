@@ -19,6 +19,7 @@ function catalog(locale, revision = "initial") {
 function setup() {
   const calls = [];
   const handlers = {};
+  const events = {};
   const store = loadSource("src/lib/store.ts", (specifier) => {
     if (specifier === "@tauri-apps/api/core") return {
       invoke: async (command, args) => {
@@ -30,10 +31,40 @@ function setup() {
         throw new Error(`Unexpected command: ${command}`);
       },
     };
-    if (specifier === "@tauri-apps/api/event") return {};
+    if (specifier === "@tauri-apps/api/event") return {
+      listen: async (channel, handler) => {
+        events[channel] = handler;
+        return () => { delete events[channel]; };
+      },
+    };
   });
-  return { ...store, snapshot: store.watcherStore.getSnapshot, calls, handlers };
+  return {
+    ...store, snapshot: store.watcherStore.getSnapshot, calls, handlers,
+    emit: (channel, payload) => events[channel]?.({ payload }),
+  };
 }
+
+test("a new checkout task removes the preceding payment link from the desktop state", async () => {
+  const app = setup();
+  const oldLink = { url: "https://qr.alipay.com/old", kind: "qr", receivedAt: 1 };
+  const oldStatus = { partNumber: "MJYE4CH/A", storeNumber: "R683", stage: "paymentLink", updatedAt: 1 };
+  Object.assign(app.handlers, {
+    list_regions: () => [], list_categories: () => [],
+    get_settings: () => app.snapshot().settings,
+    get_snapshot: () => [], is_running: () => true,
+    get_payment_link: () => oldLink, get_bot_status: () => oldStatus,
+    check_for_update: () => null,
+  });
+  await app.connect();
+  assert.equal(app.snapshot().paymentLink?.url, oldLink.url);
+
+  app.emit("watcher://payment-link", null);
+  app.emit("watcher://bot-status", { ...oldStatus, stage: "starting", updatedAt: 2 });
+  assert.equal(app.snapshot().paymentLink, null);
+  assert.equal(app.snapshot().botStatus.stage, "starting");
+  app.emit("watcher://payment-link", { url: "https://qr.alipay.com/new", kind: "qr", receivedAt: 3 });
+  assert.equal(app.snapshot().paymentLink?.url, "https://qr.alipay.com/new");
+});
 
 test("a completed refresh for the previous locale cannot replace the selected catalog", async () => {
   const app = setup();
