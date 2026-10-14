@@ -258,18 +258,24 @@ async def wait_until(predicate, label, timeout=20):
 
 async def run_browser(page_port, extension, profile, navigation_mode, payment_mode):
     command = [
-        str(chrome_binary()), "--headless=new", "--remote-debugging-port=0",
-        "--remote-allow-origins=*", "--disable-background-networking",
+        str(chrome_binary()), "--headless=new", "--remote-debugging-address=127.0.0.1",
+        "--remote-debugging-port=0", "--enable-unsafe-extension-debugging",
+        "--disable-background-networking",
         "--disable-popup-blocking",
         "--no-proxy-server", f"--user-data-dir={profile}",
-        f"--disable-extensions-except={extension}", f"--load-extension={extension}",
         "--no-first-run", "--no-default-browser-check", "about:blank",
     ]
     process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         marker = profile / "DevToolsActivePort"
         await wait_until(marker.exists, "Chrome DevTools port", timeout=10)
-        port = marker.read_text().splitlines()[0]
+        port, browser_path = marker.read_text().splitlines()[:2]
+        async with websockets.connect(f"ws://127.0.0.1:{port}{browser_path}") as socket:
+            browser_cdp = CDP(socket)
+            await browser_cdp.start()
+            loaded = await browser_cdp.call("Extensions.loadUnpacked", {"path": str(extension)})
+            if not loaded.get("id"):
+                raise RuntimeError("Chrome did not return the test extension ID")
 
         def targets():
             with urlopen(f"http://127.0.0.1:{port}/json", timeout=3) as response:
