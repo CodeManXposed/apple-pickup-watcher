@@ -171,6 +171,12 @@
       notice('请核对商品、门店、金额及资料；点击“现在下订单”后 Apple 才会跳转支付宝。');
       return;
     }
+    const host = location.hostname;
+    if (!(host === 'www.apple.com.cn' || host.endsWith('.www.apple.com.cn') ||
+        host.endsWith('.store.apple.com.cn'))) {
+      notice('自动下单仅支持 Apple 中国大陆商店；请手动核对当前地区和货币。', true);
+      return;
+    }
     const maxCny = Number(config.maxCny);
     if (!Number.isSafeInteger(maxCny) || maxCny < 1 || maxCny > 1_000_000 ||
         !flow.pickupConfirmed || !flow.alipayConfirmed || !/^[a-f0-9]{32}$/.test(flow.taskId || '')) {

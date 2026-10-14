@@ -17,8 +17,8 @@ function button(label, group = null) {
   };
 }
 
-async function page({ pathname, hash = '', official = [], candidates = [], phase = null, selectors = {}, profileReady = false, flowProps = {}, orderConfig = null }) {
-  const location = { pathname, search: '', hash, origin: 'https://www.apple.com.cn' };
+async function page({ pathname, hash = '', official = [], candidates = [], phase = null, selectors = {}, profileReady = false, flowProps = {}, orderConfig = null, hostname = 'secure11.www.apple.com.cn' }) {
+  const location = { pathname, search: '', hash, hostname, origin: 'https://www.apple.com.cn' };
   const history = { state: null, replaceState(_state, _title, url) { this.url = url; } };
   const notices = new Map();
   const attributes = new Map();
@@ -128,6 +128,22 @@ test('unmarked bag cannot start checkout and guest step does not place an order'
   });
   assert.equal(guest.clicks, 1);
   assert.equal(placeOrder.clicks, 0);
+  assert.equal(result.phase, 'guest-clicked');
+});
+
+test('auto order never treats another Apple locale as CNY', async () => {
+  const order = button('Place your order');
+  const result = await page({
+    pathname: '/shop/checkout', hostname: 'secure11.www.apple.com', phase: 'guest-clicked',
+    flowProps: { pickupConfirmed: true, alipayConfirmed: true },
+    orderConfig: { enabled: true, maxCny: 9999 },
+    selectors: {
+      '[data-autom="continue-button-placeOrder"]': [order],
+      'span, strong, b, dt, th, p, div': [totalLabel('9,999.00')],
+      '[role="dialog"]': [],
+    },
+  });
+  assert.equal(order.clicks, 0);
   assert.equal(result.phase, 'guest-clicked');
 });
 
