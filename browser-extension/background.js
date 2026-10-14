@@ -129,6 +129,20 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     }
     const flow = await flowFor(tabId);
     if (message?.type === 'apw-get-checkout') return flow;
+    if (message?.type === 'apw-confirm-store' && flow && applePage(sender.url) &&
+        flow.phase === 'guest-clicked' && message.storeNumber === flow.storeNumber &&
+        /\/shop\/checkout(?:\/|$)/.test(new URL(sender.url).pathname)) {
+      const updated = { ...flow, pickupConfirmed: true };
+      await chrome.storage.session.set({ [key]: updated });
+      return updated;
+    }
+    if (message?.type === 'apw-confirm-alipay' && flow && applePage(sender.url) &&
+        flow.phase === 'guest-clicked' && flow.pickupConfirmed &&
+        /\/shop\/checkout(?:\/|$)/.test(new URL(sender.url).pathname)) {
+      const updated = { ...flow, alipayConfirmed: true };
+      await chrome.storage.session.set({ [key]: updated });
+      return updated;
+    }
     if (message?.type === 'apw-checkout-step' && flow && applePage(sender.url)) {
       const next = { bag: 'bag-clicked', 'bag-clicked': 'guest-clicked', 'guest-clicked': 'order-submitted' }[flow.phase];
       if (next !== message.phase) return null;

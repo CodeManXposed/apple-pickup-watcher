@@ -503,6 +503,20 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
                         ) {
                             let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
                         }
+                        if result.is_ok() {
+                            let watchdog_app = app.clone();
+                            tauri::async_runtime::spawn(async move {
+                                tokio::time::sleep(Duration::from_secs(90)).await;
+                                let bridge = watchdog_app.state::<PaymentBridge>();
+                                if let Some(status) = bridge.fail_if_stage(&task_id, "launched") {
+                                    let _ = watchdog_app.emit(payment_bridge::STATUS_CHANNEL, status);
+                                    let _ = watchdog_app.emit(
+                                        NOTICE_CHANNEL,
+                                        "商品页在 90 秒内未确认加入购物袋；请检查浏览器页面或 Apple 的访问限制。",
+                                    );
+                                }
+                            });
+                        }
                         result
                     },
                 )

@@ -6,7 +6,7 @@ import test from 'node:test';
 
 const script = readFileSync(resolve('browser-extension/profile.js'), 'utf8');
 
-async function saveProfile(token, response = { ok: true, status: 200 }) {
+async function saveProfile(token, response = { ok: true, status: 200 }, configure = () => {}) {
   const handlers = new Map();
   const requests = [];
   const saved = [];
@@ -35,6 +35,7 @@ async function saveProfile(token, response = { ok: true, status: 200 }) {
   await Promise.resolve();
   namedItem('bridgeToken').value = token;
   namedItem('pickup.givenName').value = '测试';
+  configure(namedItem);
   await handlers.get('submit')({ preventDefault() {} });
   return { status: status.textContent, requests, saved };
 }
@@ -61,4 +62,29 @@ test('a valid-looking but wrong code reports the bridge rejection', async () => 
   const result = await saveProfile('a'.repeat(32), { ok: false, status: 401 });
   assert.match(result.status, /连接码不匹配/);
   assert.equal(result.requests.length, 1);
+});
+
+test('auto order requires a connected bridge, complete pickup contact and an integer cap', async () => {
+  const token = 'a'.repeat(32);
+  const configure = (field) => {
+    field('autoPlaceOrder').checked = true;
+    field('maxOrderCny').value = '9999';
+    field('pickup.familyName').value = '测';
+    field('pickup.phone').value = '13800000000';
+    field('pickup.email').value = 'buyer@example.test';
+  };
+  const ok = await saveProfile(token, { ok: true, status: 200 }, configure);
+  assert.equal(ok.saved[0].apwOrderConfig.enabled, true);
+  assert.equal(ok.saved[0].apwOrderConfig.maxCny, 9999);
+
+  const badBridge = await saveProfile(token, { ok: false, status: 401 }, configure);
+  assert.equal(badBridge.saved.length, 0);
+  assert.match(badBridge.status, /连接码不匹配/);
+
+  const badCap = await saveProfile(token, { ok: true, status: 200 }, (field) => {
+    configure(field);
+    field('maxOrderCny').value = '9999.5';
+  });
+  assert.equal(badCap.saved.length, 0);
+  assert.match(badCap.status, /整数金额上限/);
 });

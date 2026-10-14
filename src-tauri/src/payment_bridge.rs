@@ -139,6 +139,21 @@ impl PaymentBridge {
         Some(next)
     }
 
+    pub fn fail_if_stage(&self, task_id: &str, expected_stage: &str) -> Option<BotStatus> {
+        let mut current = self.status.write().unwrap_or_else(|e| e.into_inner());
+        let previous = current.as_ref()?;
+        if previous.task_id != task_id || previous.stage != expected_stage {
+            return None;
+        }
+        let next = BotStatus {
+            stage: "failed".into(),
+            updated_at: now(),
+            ..previous.clone()
+        };
+        *current = Some(next.clone());
+        Some(next)
+    }
+
     fn record(&self, link: PaymentLink, task_id: Option<&str>) -> bool {
         let mut current = self.latest.write().unwrap_or_else(|e| e.into_inner());
         if current
@@ -598,6 +613,24 @@ mod tests {
             task_id,
             stage: "profile".into(),
         }));
+    }
+
+    #[test]
+    fn stale_launch_watchdog_cannot_fail_a_progressed_or_new_task() {
+        let bridge = PaymentBridge::disabled();
+        let old_id = bridge.start_task("MJYE4CH/A", "R683").task_id;
+        bridge.advance_task("launched", "MJYE4CH/A", "R683", &old_id);
+        bridge.advance_task("bag", "MJYE4CH/A", "R683", &old_id);
+        assert!(bridge.fail_if_stage(&old_id, "launched").is_none());
+        assert_eq!(bridge.status().unwrap().stage, "bag");
+
+        let new_id = bridge.start_task("MG724CH/A", "R683").task_id;
+        bridge.advance_task("launched", "MG724CH/A", "R683", &new_id);
+        assert!(bridge.fail_if_stage(&old_id, "launched").is_none());
+        assert_eq!(
+            bridge.fail_if_stage(&new_id, "launched").unwrap().stage,
+            "failed"
+        );
     }
 
     #[test]

@@ -106,10 +106,10 @@ const BOT_STAGE_LABEL: Record<BotStatus["stage"], string> = {
   guest: "已选择访客结账",
   profile: "正在填写结账资料",
   payment: "正在选择支付宝",
-  review: "等待核对并提交订单",
-  orderSubmitted: "已提交订单，等待支付宝链接",
+  review: "正在核对订单总额",
+  orderSubmitted: "已尝试提交订单，等待支付宝链接",
   paymentLink: "已收到支付宝付款链接",
-  failed: "浏览器启动失败，请查看日志",
+  failed: "自动结账任务失败，请查看日志",
 };
 
 function StatusBadge({ availability }: { availability: Availability }) {

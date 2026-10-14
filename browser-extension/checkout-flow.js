@@ -1,4 +1,4 @@
-// 仅在本扩展成功加车后的同一 Chrome 标签页推进结账；不触碰付款和下单按钮。
+// 仅在本扩展成功加车后的同一 Chrome 标签页推进结账。
 (() => {
   if (window.top !== window) return;
   const BAG_PATH = /\/shop\/bag\/?$/;
@@ -9,6 +9,7 @@
   const storeNumber = params.get('apw-store');
   const partNumber = (params.get('apw-part') || '').toUpperCase();
   const taskId = params.get('apw-task');
+  const ORDER_CONFIG_KEY = 'apwOrderConfig';
   const GUEST_TEXT = /^(?:(?:以访客身份|以游客身份)(?:继续|结[账帐]|购买)|(?:继续)?以访客身份结[账帐]|访客结[账帐]|访客继续|continue as (?:a )?guest|guest checkout)$/i;
   let done = false;
   let scheduled = false;
@@ -140,7 +141,64 @@
     return byLabel.length === 1 ? byLabel[0] : null;
   }
 
-  function checkoutStep(flow) {
+  function amountCents(text) {
+    const amounts = Array.from(text.matchAll(/(?:[¥￥]|RMB\s*|CNY\s*|人民币\s*)([0-9][0-9,]*(?:\.[0-9]{1,2})?)/gi));
+    if (amounts.length !== 1) return null;
+    const raw = amounts[0][1].replaceAll(',', '');
+    if (!/^\d{1,8}(?:\.\d{1,2})?$/.test(raw)) return null;
+    const [whole, fraction = ''] = raw.split('.');
+    const cents = Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
+    return Number.isSafeInteger(cents) && cents > 0 ? cents : null;
+  }
+
+  function reviewTotalCents() {
+    const label = /^(?:订单总计|订单总额|应付总额|应付金额|总计|Order Total|Total)$/i;
+    const prices = new Set();
+    for (const node of document.querySelectorAll('span, strong, b, dt, th, p, div')) {
+      if (node.children.length || !shown(node) || !label.test((node.textContent || '').trim())) continue;
+      const row = node.parentElement;
+      const text = row?.textContent?.trim() || '';
+      if (text.length > 120) continue;
+      const cents = amountCents(text);
+      if (cents !== null) prices.add(cents);
+    }
+    return prices.size === 1 ? prices.values().next().value : null;
+  }
+
+  async function placeOrderIfAuthorized(button, flow) {
+    const { [ORDER_CONFIG_KEY]: config } = await chrome.storage.local.get(ORDER_CONFIG_KEY);
+    if (!config?.enabled) {
+      notice('请核对商品、门店、金额及资料；点击“现在下订单”后 Apple 才会跳转支付宝。');
+      return;
+    }
+    const maxCny = Number(config.maxCny);
+    if (!Number.isSafeInteger(maxCny) || maxCny < 1 || maxCny > 1_000_000 ||
+        !flow.pickupConfirmed || !flow.alipayConfirmed || !/^[a-f0-9]{32}$/.test(flow.taskId || '')) {
+      notice('自动下单条件未通过：请确认监控门店、支付宝、连接码和金额上限，然后手动核对。', true);
+      return;
+    }
+    const cents = reviewTotalCents();
+    if (cents === null) {
+      notice('无法唯一识别 Apple 订单总额，已停止自动下单。请手动核对。', true);
+      return;
+    }
+    if (cents > maxCny * 100) {
+      notice(`订单总额 ¥${(cents / 100).toFixed(2)} 超过 ¥${maxCny} 上限，已停止自动下单。`, true);
+      return;
+    }
+    if (clickedSteps.has('place-order') || !visible(button)) return;
+    const updated = await chrome.runtime.sendMessage({ type: 'apw-checkout-step', phase: 'order-submitted' });
+    if (!updated || !visible(button)) {
+      notice('无法锁定本次自动下单任务，请手动核对。', true);
+      return;
+    }
+    clickedSteps.add('place-order');
+    orderNoted = true;
+    notice(`订单总额 ¥${(cents / 100).toFixed(2)}，正在提交 Apple 订单并等待支付宝链接…`);
+    button.click();
+  }
+
+  async function checkoutStep(flow) {
     if (!CHECKOUT_PATH.test(location.pathname)) return;
     const privacy = Array.from(document.querySelectorAll('[role="dialog"]')).find((dialog) =>
       visible(dialog) && /隐私政策|数据隐私|privacy policy/i.test(dialog.textContent || ''));
@@ -157,6 +215,11 @@
       }
       if (!store.checked) {
         clickOnce('select-store', store, `正在选择监控门店 ${flow.storeNumber}…`);
+        return;
+      }
+      const confirmed = await chrome.runtime.sendMessage({ type: 'apw-confirm-store', storeNumber: flow.storeNumber });
+      if (!confirmed) {
+        notice('无法确认本次取货门店，请手动核对。', true);
         return;
       }
       clickOnce('fulfillment', fulfillment, '正在继续到取货资料…');
@@ -186,13 +249,18 @@
         clickOnce('select-alipay', alipay, '正在选择支付宝…');
         return;
       }
+      const confirmed = await chrome.runtime.sendMessage({ type: 'apw-confirm-alipay' });
+      if (!confirmed) {
+        notice('无法确认本次支付宝付款方式，请手动核对。', true);
+        return;
+      }
       clickOnce('billing', paymentContinue, '正在进入确认订单页…');
       return;
     }
     const placeOrder = firstShown('[data-autom="continue-button-placeOrder"]');
     if (placeOrder) {
       reportStage('review');
-      notice('请核对商品、门店、金额及资料；点击“现在下订单”后 Apple 才会跳转支付宝。');
+      await placeOrderIfAuthorized(placeOrder, flow);
     }
   }
 
@@ -247,7 +315,7 @@
       }
       return;
     }
-    if (flow.phase === 'guest-clicked') checkoutStep(flow);
+    if (flow.phase === 'guest-clicked') await checkoutStep(flow);
   }
 
   function schedule() {

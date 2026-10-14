@@ -104,6 +104,19 @@ test('forwards only stages from the active Apple checkout with its target', asyn
   assert.ok(statuses.every((status) => status.taskId === taskId));
 });
 
+test('order confirmations stay bound to the monitored store and checkout tab', async () => {
+  const app = background();
+  const checkout = 'https://secure11.www.apple.com.cn/shop/checkout';
+  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A', taskId }, apple);
+  await app.send({ type: 'apw-checkout-step', phase: 'bag-clicked' }, apple);
+  await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
+  assert.equal(await app.send({ type: 'apw-confirm-store', storeNumber: 'R999' }, checkout), null);
+  assert.equal(await app.send({ type: 'apw-confirm-alipay' }, checkout), null);
+  assert.equal(await app.send({ type: 'apw-confirm-store', storeNumber: 'R683' }, checkout, 2), null);
+  assert.equal((await app.send({ type: 'apw-confirm-store', storeNumber: 'R683' }, checkout))?.pickupConfirmed, true);
+  assert.equal((await app.send({ type: 'apw-confirm-alipay' }, checkout))?.alipayConfirmed, true);
+});
+
 test('new Alipay tab follows the parent order submission even when opened first', async () => {
   const app = background();
   await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A', taskId }, apple);

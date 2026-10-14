@@ -17,12 +17,13 @@ function button(label, group = null) {
   };
 }
 
-async function page({ pathname, hash = '', official = [], candidates = [], phase = null, selectors = {}, profileReady = false }) {
+async function page({ pathname, hash = '', official = [], candidates = [], phase = null, selectors = {}, profileReady = false, flowProps = {}, orderConfig = null }) {
   const location = { pathname, search: '', hash, origin: 'https://www.apple.com.cn' };
   const history = { state: null, replaceState(_state, _title, url) { this.url = url; } };
   const notices = new Map();
   const attributes = new Map();
   let currentPhase = phase;
+  let currentFlow = { storeNumber: 'R683', taskId, ...flowProps };
   let clickHandler;
   const sent = [];
   const chrome = {
@@ -31,9 +32,12 @@ async function page({ pathname, hash = '', official = [], candidates = [], phase
         sent.push(message);
         if (message.type === 'apw-begin-checkout') currentPhase = 'bag';
         if (message.type === 'apw-checkout-step') currentPhase = message.phase;
-        return currentPhase ? { phase: currentPhase, storeNumber: 'R683' } : null;
+        if (message.type === 'apw-confirm-store') currentFlow.pickupConfirmed = true;
+        if (message.type === 'apw-confirm-alipay') currentFlow.alipayConfirmed = true;
+        return currentPhase ? { phase: currentPhase, ...currentFlow } : null;
       },
     },
+    storage: { local: { async get() { return { apwOrderConfig: orderConfig }; } } },
   };
   const document = {
     documentElement: {
@@ -242,4 +246,57 @@ test('records final order only after the Apple order button is clicked', async (
   result.click({ closest(selector) { return selector === '[data-autom="continue-button-placeOrder"]' ? order : null; } });
   await new Promise(setImmediate);
   assert.equal(result.phase, 'order-submitted');
+});
+
+function totalLabel(amount) {
+  return {
+    children: [], textContent: '订单总计', parentElement: { textContent: `订单总计 ¥${amount}` },
+    closest() { return null; }, getClientRects() { return [1]; },
+  };
+}
+
+test('auto order clicks only when the confirmed Apple total is within the configured cap', async () => {
+  const order = button('现在下订单');
+  const result = await page({
+    pathname: '/shop/checkout', phase: 'guest-clicked',
+    flowProps: { pickupConfirmed: true, alipayConfirmed: true },
+    orderConfig: { enabled: true, maxCny: 9999 },
+    selectors: {
+      '[data-autom="continue-button-placeOrder"]': [order],
+      'span, strong, b, dt, th, p, div': [totalLabel('9,999.00')],
+      '[role="dialog"]': [],
+    },
+  });
+  assert.equal(order.clicks, 1);
+  assert.equal(result.phase, 'order-submitted');
+});
+
+test('auto order stops above the cap or when total or checkout confirmations are uncertain', async () => {
+  for (const [amount, flowProps, expected] of [
+    ['10,000.00', { pickupConfirmed: true, alipayConfirmed: true }, 'guest-clicked'],
+    ['9,999.00', { pickupConfirmed: false, alipayConfirmed: true }, 'guest-clicked'],
+    ['9,999.00', { pickupConfirmed: true, alipayConfirmed: false }, 'guest-clicked'],
+  ]) {
+    const order = button('现在下订单');
+    const result = await page({
+      pathname: '/shop/checkout', phase: 'guest-clicked', flowProps,
+      orderConfig: { enabled: true, maxCny: 9999 },
+      selectors: {
+        '[data-autom="continue-button-placeOrder"]': [order],
+        'span, strong, b, dt, th, p, div': [totalLabel(amount)],
+        '[role="dialog"]': [],
+      },
+    });
+    assert.equal(order.clicks, 0);
+    assert.equal(result.phase, expected);
+  }
+  const order = button('现在下订单');
+  const result = await page({
+    pathname: '/shop/checkout', phase: 'guest-clicked',
+    flowProps: { pickupConfirmed: true, alipayConfirmed: true },
+    orderConfig: { enabled: true, maxCny: 9999 },
+    selectors: { '[data-autom="continue-button-placeOrder"]': [order], '[role="dialog"]': [] },
+  });
+  assert.equal(order.clicks, 0);
+  assert.equal(result.phase, 'guest-clicked');
 });
