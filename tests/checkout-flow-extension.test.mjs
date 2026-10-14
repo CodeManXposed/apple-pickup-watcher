@@ -17,7 +17,7 @@ function button(label, group = null) {
   };
 }
 
-async function page({ pathname, hash = '', official = [], candidates = [], phase = null, selectors = {}, profileReady = false, flowProps = {}, orderConfig = null, hostname = 'secure11.www.apple.com.cn', activeTask = true }) {
+async function page({ pathname, hash = '', official = [], candidates = [], phase = null, selectors = {}, profileReady = false, flowProps = {}, orderConfig = null, hostname = 'secure11.www.apple.com.cn', activeTask = true, failOnce = [] }) {
   const location = { pathname, search: '', hash, hostname, origin: 'https://www.apple.com.cn' };
   const history = { state: null, replaceState(_state, _title, url) { this.url = url; } };
   const notices = new Map();
@@ -25,11 +25,15 @@ async function page({ pathname, hash = '', official = [], candidates = [], phase
   let currentPhase = phase;
   let currentFlow = { storeNumber: 'R683', taskId, ...flowProps };
   let clickHandler;
+  let interval;
   const sent = [];
+  const failures = new Set(failOnce);
   const chrome = {
     runtime: {
       async sendMessage(message) {
         sent.push(message);
+        if (failures.delete(message.type)) return null;
+        if (message.type === 'apw-task-stage') return { ok: true };
         if (message.type === 'apw-active-task') return activeTask;
         if (message.type === 'apw-begin-checkout') currentPhase = 'bag';
         if (message.type === 'apw-checkout-step') currentPhase = message.phase;
@@ -67,9 +71,10 @@ async function page({ pathname, hash = '', official = [], candidates = [], phase
     Event: class { constructor(type) { this.type = type; } },
     MutationObserver: class { observe() {} },
     setTimeout() { return 1; },
+    setInterval(callback) { interval = callback; return 1; },
   });
   await new Promise(setImmediate);
-  return { history, notices, sent, click(target) { clickHandler?.({ target }); }, get phase() { return currentPhase; } };
+  return { history, notices, sent, tick: () => interval?.(), click(target) { clickHandler?.({ target }); }, get phase() { return currentPhase; } };
 }
 
 test('marked bag clicks the official checkout button once', async () => {
@@ -192,6 +197,42 @@ test('pickup fulfillment selects only the monitored store before continuing', as
   target.checked = true;
   await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
   assert.equal(fulfillment.clicks, 1);
+});
+
+test('checkout retries a temporary store confirmation failure without a DOM change', async () => {
+  const store = button('上海环球港');
+  store.value = 'R683';
+  store.checked = true;
+  const fulfillment = button('继续');
+  const timeslot = button('');
+  timeslot.value = '12:30';
+  timeslot.parentElement = { textContent: '可选时段' };
+  timeslot.options = [{ value: '12:30', textContent: '12:30 – 12:45', selected: true }];
+  const result = await page({
+    pathname: '/shop/checkout', phase: 'guest-clicked', failOnce: ['apw-confirm-store'],
+    selectors: {
+      'input[type="radio"].form-selector-input': [store],
+      select: [timeslot],
+      '[data-autom="fulfillment-continue-button"]': [fulfillment],
+      '[role="dialog"]': [],
+    },
+  });
+  assert.equal(fulfillment.clicks, 0);
+  await result.tick();
+  assert.equal(fulfillment.clicks, 1);
+  assert.equal(result.sent.filter((message) => message.type === 'apw-confirm-store').length, 2);
+});
+
+test('a failed stage report is retried while the checkout page is idle', async () => {
+  const pickupContinue = button('继续');
+  const result = await page({
+    pathname: '/shop/checkout', phase: 'guest-clicked', failOnce: ['apw-task-stage'],
+    selectors: { '.rs-pickup-button button': [pickupContinue], '[role="dialog"]': [] },
+  });
+  assert.equal(result.sent.filter((message) => message.type === 'apw-task-stage' && message.stage === 'profile').length, 1);
+  await result.tick();
+  await new Promise(setImmediate);
+  assert.equal(result.sent.filter((message) => message.type === 'apw-task-stage' && message.stage === 'profile').length, 2);
 });
 
 test('pickup selects pickup mode before looking for a store', async () => {

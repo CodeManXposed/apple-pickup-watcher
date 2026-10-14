@@ -15,11 +15,13 @@
   const GUEST_TEXT = /^(?:(?:以访客身份|以游客身份)(?:继续|结[账帐]|购买)|(?:继续)?以访客身份结[账帐]|访客结[账帐]|访客继续|continue as (?:a )?guest|guest checkout)$/i;
   let done = false;
   let scheduled = false;
+  let acting = false;
   const clickedSteps = new Set();
   let orderNoted = false;
   let begun = false;
   const requestedContacts = new WeakSet();
   const reportedStages = new Set();
+  const reportingStages = new Set();
   const startedAt = Date.now();
 
   function shown(element) {
@@ -53,9 +55,15 @@
   }
 
   function reportStage(stage) {
-    if (reportedStages.has(stage)) return;
-    reportedStages.add(stage);
-    void chrome.runtime.sendMessage({ type: 'apw-task-stage', stage }).catch(() => {});
+    if (reportedStages.has(stage) || reportingStages.has(stage)) return;
+    reportingStages.add(stage);
+    void chrome.runtime.sendMessage({ type: 'apw-task-stage', stage })
+      .then((result) => {
+        // 409 表示桌面进度已经越过这一步，旧阶段不需要继续回传。
+        if (result?.ok || result?.reason === 'bridge-http-409') reportedStages.add(stage);
+      })
+      .catch(() => {})
+      .finally(() => reportingStages.delete(stage));
   }
 
   function checkoutButton() {
@@ -458,7 +466,19 @@
   function schedule() {
     if (done || scheduled) return;
     scheduled = true;
-    setTimeout(() => { scheduled = false; void act(); }, 120);
+    setTimeout(() => { scheduled = false; void tick(); }, 120);
+  }
+
+  async function tick() {
+    if (done || acting) return;
+    acting = true;
+    try {
+      await act();
+    } catch {
+      notice('结账步骤暂未完成，正在重试；请检查浏览器和桌面应用的连接。', true);
+    } finally {
+      acting = false;
+    }
   }
 
   async function start() {
@@ -469,7 +489,7 @@
         void chrome.runtime.sendMessage({ type: 'apw-checkout-step', phase: 'order-submitted' });
       }, true);
     }
-    await act();
+    await tick();
     if (done) return;
     new MutationObserver((records) => {
       if (records.some((record) => !record.target.closest?.('#apw-checkout-notice'))) schedule();
@@ -480,6 +500,8 @@
     document.addEventListener('input', schedule);
     document.addEventListener('change', schedule);
     if (markedBag) setTimeout(schedule, 30000);
+    // 桥接短暂不可用而页面不再变化时，继续检查当前步骤；已点击的按钮不会重复点击。
+    setInterval(tick, 2000);
   }
   void start();
 })();
