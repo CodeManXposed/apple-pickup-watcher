@@ -31,6 +31,7 @@ pub struct PaymentLink {
     /// `qr` 表示页面上可复制的二维码目标；`cashier` 表示支付宝收银台地址。
     pub kind: String,
     pub received_at: u64,
+    pub task_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,7 +49,6 @@ struct IncomingLink {
 pub struct BotStatus {
     pub part_number: String,
     pub store_number: String,
-    #[serde(skip_serializing)]
     pub task_id: String,
     pub stage: String,
     pub updated_at: u64,
@@ -73,7 +73,7 @@ struct IncomingTask {
 
 pub struct PaymentBridge {
     token: Option<String>,
-    latest: RwLock<Option<(PaymentLink, Option<String>)>>,
+    latest: RwLock<Option<PaymentLink>>,
     status: RwLock<Option<BotStatus>>,
     discord_delivery: tokio::sync::Mutex<DiscordDelivery>,
 }
@@ -126,8 +126,7 @@ impl PaymentBridge {
         self.latest
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(|(link, _)| link.clone())
+            .clone()
     }
 
     fn is_current_link(&self, link: &PaymentLink, task_id: &str) -> bool {
@@ -135,7 +134,9 @@ impl PaymentBridge {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
-            .is_some_and(|(current, id)| current.url == link.url && id.as_deref() == Some(task_id))
+            .is_some_and(|current| {
+                current.url == link.url && current.kind == link.kind && current.task_id == task_id
+            })
     }
 
     pub fn status(&self) -> Option<BotStatus> {
@@ -210,25 +211,27 @@ impl PaymentBridge {
         Some(next)
     }
 
-    fn record(&self, link: PaymentLink, task_id: Option<&str>) -> bool {
+    fn record(&self, link: PaymentLink) -> bool {
         let mut current = self.latest.write().unwrap_or_else(|e| e.into_inner());
-        if current.as_ref().is_some_and(|(old, old_task)| {
-            old_task.as_deref() == task_id
+        if current.as_ref().is_some_and(|old| {
+            old.task_id == link.task_id
                 && (old.url == link.url || old.kind == "qr" && link.kind == "cashier")
         }) {
             return false;
         }
-        *current = Some((link, task_id.map(str::to_owned)));
+        *current = Some(link);
         true
     }
 
     fn record_current(&self, incoming: &IncomingLink, link: PaymentLink) -> Option<bool> {
         // 持有状态读锁直到链接写入结束；新任务须等待它完成，然后清除旧链接。
         let status = self.status.read().unwrap_or_else(|e| e.into_inner());
-        if !link_matches_task(incoming, status.as_ref()) {
+        if incoming.task_id.as_deref() != Some(link.task_id.as_str())
+            || !link_matches_task(incoming, status.as_ref())
+        {
             return None;
         }
-        Some(self.record(link, incoming.task_id.as_deref()))
+        Some(self.record(link))
     }
 }
 
@@ -578,6 +581,10 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
         respond(&mut socket, 400, origin, "{}").await;
         return;
     }
+    let Some(task_id) = incoming.task_id.clone() else {
+        respond(&mut socket, 409, origin, "{}").await;
+        return;
+    };
     let link = PaymentLink {
         url: incoming.url.clone(),
         kind: incoming.kind.clone(),
@@ -585,10 +592,7 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
-    };
-    let Some(task_id) = incoming.task_id.clone() else {
-        respond(&mut socket, 409, origin, "{}").await;
-        return;
+        task_id: task_id.clone(),
     };
     let Some(fresh) = bridge.record_current(&incoming, link.clone()) else {
         respond(&mut socket, 409, origin, "{}").await;
@@ -929,7 +933,9 @@ mod tests {
     #[test]
     fn starting_another_task_clears_its_predecessors_link_and_rejects_late_delivery() {
         let bridge = PaymentBridge::disabled();
-        let old_id = bridge.start_task("MJYE4CH/A", "R683").task_id;
+        let old_status = bridge.start_task("MJYE4CH/A", "R683");
+        let old_id = old_status.task_id.clone();
+        assert_eq!(serde_json::to_value(&old_status).unwrap()["taskId"], old_id);
         bridge.advance_task("orderSubmitted", "MJYE4CH/A", "R683", &old_id);
         let incoming = IncomingLink {
             url: "https://qr.alipay.com/old-order".into(),
@@ -942,9 +948,14 @@ mod tests {
             url: incoming.url.clone(),
             kind: incoming.kind.clone(),
             received_at: 1,
+            task_id: incoming.task_id.clone().unwrap(),
         };
         assert_eq!(bridge.record_current(&incoming, link.clone()), Some(true));
         assert_eq!(bridge.latest().unwrap().url, link.url);
+        assert_eq!(
+            serde_json::to_value(bridge.latest().unwrap()).unwrap()["taskId"],
+            incoming.task_id.as_deref().unwrap()
+        );
 
         bridge.start_task("MG724CH/A", "R683");
         assert!(bridge.latest().is_none());
@@ -959,10 +970,14 @@ mod tests {
             url: "https://excashier.alipay.com/payment.htm".into(),
             kind: "cashier".into(),
             received_at: 1,
+            task_id: "first".into(),
         };
-        assert!(bridge.record(link.clone(), Some("first")));
-        assert!(!bridge.record(link.clone(), Some("first")));
-        assert!(bridge.record(link, Some("second")));
+        assert!(bridge.record(link.clone()));
+        assert!(!bridge.record(link.clone()));
+        assert!(bridge.record(PaymentLink {
+            task_id: "second".into(),
+            ..link
+        }));
     }
 
     #[test]
@@ -972,17 +987,22 @@ mod tests {
             url: "https://excashier.alipay.com/payment.htm".into(),
             kind: "cashier".into(),
             received_at: 1,
+            task_id: "task-one".into(),
         };
         let qr = PaymentLink {
             url: "https://qr.alipay.com/test-code".into(),
             kind: "qr".into(),
             received_at: 2,
+            task_id: "task-one".into(),
         };
-        assert!(bridge.record(cashier.clone(), Some("task-one")));
-        assert!(bridge.record(qr.clone(), Some("task-one")));
-        assert!(!bridge.record(cashier.clone(), Some("task-one")));
+        assert!(bridge.record(cashier.clone()));
+        assert!(bridge.record(qr.clone()));
+        assert!(!bridge.record(cashier.clone()));
         assert_eq!(bridge.latest().unwrap().url, qr.url);
-        assert!(bridge.record(cashier, Some("task-two")));
+        assert!(bridge.record(PaymentLink {
+            task_id: "task-two".into(),
+            ..cashier
+        }));
     }
 
     #[tokio::test]

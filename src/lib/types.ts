@@ -100,12 +100,14 @@ export interface PaymentLink {
   url: string;
   kind: "qr" | "cashier";
   receivedAt: number;
+  taskId: string;
 }
 
 /** 独立浏览器中当前任务的进度，由本机桥接推送。 */
 export interface BotStatus {
   partNumber: string;
   storeNumber: string;
+  taskId: string;
   stage: "starting" | "launched" | "bag" | "checkout" | "guest" | "privacy" | "profile" | "profileAction" |
     "payment" | "review" | "orderSubmitted" | "paymentLink" | "failed";
   updatedAt: number;

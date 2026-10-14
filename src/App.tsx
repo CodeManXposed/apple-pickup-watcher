@@ -291,6 +291,8 @@ function LogLine({ line }: { line: string }) {
 
 export default function App() {
   const ui = useSyncExternalStore(watcherStore.subscribe, watcherStore.getSnapshot);
+  const currentPaymentLink = ui.botStatus && ui.paymentLink?.taskId === ui.botStatus.taskId
+    ? ui.paymentLink : null;
   const [activeTab, setActiveTab] = useState<WorkspaceTab>(readWorkspaceTab());
   const [profileFeedback, setProfileFeedback] = useState("");
   const [browserPreparing, setBrowserPreparing] = useState(false);
@@ -603,9 +605,9 @@ export default function App() {
               {tab === "monitor" && ui.rows.length > 0 && (
                 <span className="bg-muted text-muted-foreground rounded-full px-1.5 text-xs tabular-nums">{ui.rows.length}</span>
               )}
-              {tab === "tasks" && (ui.paymentLink || ui.botStatus) && (
+              {tab === "tasks" && (currentPaymentLink || ui.botStatus) && (
                 <span className="bg-muted text-muted-foreground rounded-full px-1.5 text-xs">
-                  {ui.paymentLink ? "付款链接" : "进度"}
+                  {currentPaymentLink ? "付款链接" : "进度"}
                 </span>
               )}
             </button>
@@ -1226,26 +1228,26 @@ export default function App() {
           </section>
         )}
 
-        {ui.paymentLink && (
+        {currentPaymentLink && (
           <section className="bg-card shrink-0 rounded-xl border p-4 shadow-xs">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <h2 className="font-semibold">最近收到的支付宝付款链接</h2>
                 <p className="text-muted-foreground text-xs">
-                  {ui.paymentLink.kind === "qr" ? "二维码目标地址可能很快失效" : "支付宝收银台页面"}；付款前请核对商家与金额。
+                  {currentPaymentLink.kind === "qr" ? "二维码目标地址可能很快失效" : "支付宝收银台页面"}；付款前请核对商家与金额。
                 </p>
               </div>
-              <Button variant="outline" size="sm" onClick={() => void copyPaymentLink(ui.paymentLink!.url)}>
+              <Button variant="outline" size="sm" onClick={() => void copyPaymentLink(currentPaymentLink.url)}>
                 复制链接
               </Button>
             </div>
-            <a className="text-primary mt-2 block truncate text-sm underline" href={ui.paymentLink.url} target="_blank" rel="noreferrer">
-              {ui.paymentLink.url}
+            <a className="text-primary mt-2 block truncate text-sm underline" href={currentPaymentLink.url} target="_blank" rel="noreferrer">
+              {currentPaymentLink.url}
             </a>
           </section>
         )}
 
-        {!ui.paymentLink && (
+        {!currentPaymentLink && (
           <section className="bg-card rounded-xl border p-4 shadow-xs">
             <h2 className="font-semibold">支付宝付款链接</h2>
             <p className="text-muted-foreground mt-1 text-sm">提交 Apple 订单并进入支付宝后，链接会显示在这里。</p>

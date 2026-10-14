@@ -195,6 +195,23 @@ let starting: Promise<void> | null = null;
 let paymentEventSerial = 0;
 let botStatusEventSerial = 0;
 
+function applyBotStatus(status: BotStatus): void {
+  botStatusEventSerial += 1;
+  if (state.botStatus?.taskId !== status.taskId) paymentEventSerial += 1;
+  update({
+    botStatus: status,
+    paymentLink: state.paymentLink?.taskId === status.taskId ? state.paymentLink : null,
+  });
+  // 付款事件可能比状态事件先到；按后端当前任务重新读取一次即可恢复。
+  if (status.stage === "paymentLink" && !state.paymentLink) {
+    void invoke<PaymentLink | null>("get_payment_link").then((link) => {
+      if (link?.taskId === status.taskId && state.botStatus?.taskId === status.taskId && !state.paymentLink) {
+        update({ paymentLink: link });
+      }
+    }).catch(() => {});
+  }
+}
+
 /**
  * 连接后端。重复调用是安全的。
  *
@@ -210,17 +227,30 @@ export function connect(): Promise<void> {
       // 这条通道不只在启动时用：发提醒失败、打开购物袋失败也走这里，前缀不能写死成「启动」。
       listen<string>(NOTICE_CHANNEL, (e) => pushLog(`提示：${e.payload}`)),
       listen<PaymentLink | null>(PAYMENT_CHANNEL, (e) => {
-        paymentEventSerial += 1;
         if (e.payload === null) {
+          paymentEventSerial += 1;
           update({ paymentLink: null });
           return;
         }
+        if (state.botStatus && e.payload.taskId !== state.botStatus.taskId) return;
+        paymentEventSerial += 1;
         update({ paymentLink: e.payload });
-        pushLog("已收到支付宝付款链接，请核对商家与金额。");
+        if (state.botStatus?.taskId === e.payload.taskId) {
+          pushLog("已收到支付宝付款链接，请核对商家与金额。");
+        }
       }),
       listen<BotStatus>(BOT_STATUS_CHANNEL, (e) => {
-        botStatusEventSerial += 1;
-        update({ botStatus: e.payload, ...(e.payload.stage === "starting" ? { paymentLink: null } : {}) });
+        if (state.botStatus && e.payload.taskId !== state.botStatus.taskId && e.payload.stage !== "starting") {
+          // 若漏收新任务的 starting，向后端确认后接纳后续阶段；旧任务迟到事件会被拒绝。
+          const observedTaskId = state.botStatus.taskId;
+          void invoke<BotStatus | null>("get_bot_status").then((current) => {
+            if (state.botStatus?.taskId === observedTaskId && current?.taskId === e.payload.taskId) {
+              applyBotStatus(current);
+            }
+          }).catch(() => {});
+          return;
+        }
+        applyBotStatus(e.payload);
       }),
     ]);
 

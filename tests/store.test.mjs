@@ -46,8 +46,8 @@ function setup() {
 
 test("a new checkout task removes the preceding payment link from the desktop state", async () => {
   const app = setup();
-  const oldLink = { url: "https://qr.alipay.com/old", kind: "qr", receivedAt: 1 };
-  const oldStatus = { partNumber: "MJYE4CH/A", storeNumber: "R683", stage: "paymentLink", updatedAt: 1 };
+  const oldLink = { url: "https://qr.alipay.com/old", kind: "qr", receivedAt: 1, taskId: "old" };
+  const oldStatus = { partNumber: "MJYE4CH/A", storeNumber: "R683", taskId: "old", stage: "paymentLink", updatedAt: 1 };
   Object.assign(app.handlers, {
     list_regions: () => [], list_categories: () => [],
     get_settings: () => app.snapshot().settings,
@@ -59,11 +59,46 @@ test("a new checkout task removes the preceding payment link from the desktop st
   assert.equal(app.snapshot().paymentLink?.url, oldLink.url);
 
   app.emit("watcher://payment-link", null);
-  app.emit("watcher://bot-status", { ...oldStatus, stage: "starting", updatedAt: 2 });
+  app.emit("watcher://bot-status", { ...oldStatus, taskId: "new", stage: "starting", updatedAt: 2 });
   assert.equal(app.snapshot().paymentLink, null);
   assert.equal(app.snapshot().botStatus.stage, "starting");
-  app.emit("watcher://payment-link", { url: "https://qr.alipay.com/new", kind: "qr", receivedAt: 3 });
+  app.emit("watcher://payment-link", { url: "https://qr.alipay.com/new", kind: "qr", receivedAt: 3, taskId: "new" });
   assert.equal(app.snapshot().paymentLink?.url, "https://qr.alipay.com/new");
+  app.emit("watcher://payment-link", oldLink);
+  assert.equal(app.snapshot().paymentLink?.url, "https://qr.alipay.com/new", "late old events cannot replace the current link");
+  app.handlers.get_bot_status = () => app.snapshot().botStatus;
+  app.emit("watcher://bot-status", oldStatus);
+  await new Promise(setImmediate);
+  assert.equal(app.snapshot().botStatus.taskId, "new", "late old status events cannot replace the current task");
+
+  const verification = deferred();
+  app.handlers.get_bot_status = () => verification.promise;
+  app.emit("watcher://bot-status", oldStatus);
+  app.emit("watcher://bot-status", { ...oldStatus, taskId: "third", stage: "starting", updatedAt: 4 });
+  verification.resolve(oldStatus);
+  await new Promise(setImmediate);
+  assert.equal(app.snapshot().botStatus.taskId, "third", "a delayed verification cannot roll back a newer task");
+});
+
+test("the payment stage recovers a link event received before its task status", async () => {
+  const app = setup();
+  const link = { url: "https://qr.alipay.com/current", kind: "qr", receivedAt: 2, taskId: "current" };
+  Object.assign(app.handlers, {
+    list_regions: () => [], list_categories: () => [],
+    get_settings: () => app.snapshot().settings,
+    get_snapshot: () => [], is_running: () => true,
+    get_payment_link: () => null,
+    get_bot_status: () => ({ partNumber: "MJYE4CH/A", storeNumber: "R683", taskId: "previous", stage: "starting", updatedAt: 1 }),
+    check_for_update: () => null,
+  });
+  await app.connect();
+  app.handlers.get_payment_link = () => link;
+  app.handlers.get_bot_status = () => ({ partNumber: "MJYE4CH/A", storeNumber: "R683", taskId: "current", stage: "paymentLink", updatedAt: 2 });
+  app.emit("watcher://payment-link", link);
+  assert.equal(app.snapshot().paymentLink, null, "a link for another task waits for its status");
+  app.emit("watcher://bot-status", { partNumber: "MJYE4CH/A", storeNumber: "R683", taskId: "current", stage: "paymentLink", updatedAt: 2 });
+  await new Promise(setImmediate);
+  assert.equal(app.snapshot().paymentLink?.url, link.url);
 });
 
 test("a completed refresh for the previous locale cannot replace the selected catalog", async () => {

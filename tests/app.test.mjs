@@ -183,12 +183,15 @@ test("the task page displays the latest cashier or QR payment link", () => {
   const app = renderApp();
   const cashier = "https://excashier.alipay.com/payment.htm?order=test";
   const qr = "https://qr.alipay.com/test-code";
-  app.state.paymentLink = { url: cashier, kind: "cashier", receivedAt: 1 };
+  app.state.botStatus = { partNumber: "MJYE4CH/A", storeNumber: "R683", taskId: "current", stage: "paymentLink", updatedAt: 1 };
+  app.state.paymentLink = { url: cashier, kind: "cashier", receivedAt: 1, taskId: "current" };
   assert.deepEqual(app.paymentLinks(), [], "the monitor page should not display checkout links");
   app.tab("tasks").onClick();
   assert.equal(app.paymentLinks()[0].href, cashier);
-  app.state.paymentLink = { url: qr, kind: "qr", receivedAt: 2 };
+  app.state.paymentLink = { url: qr, kind: "qr", receivedAt: 2, taskId: "current" };
   assert.equal(app.paymentLinks()[0].href, qr, "a refreshed QR link should replace the cashier link");
+  app.state.botStatus = { ...app.state.botStatus, taskId: "next", stage: "starting" };
+  assert.deepEqual(app.paymentLinks(), [], "a late payment event from the previous task must stay hidden");
 });
 
 test("a failed browser preflight is visible without starting monitoring", async () => {
