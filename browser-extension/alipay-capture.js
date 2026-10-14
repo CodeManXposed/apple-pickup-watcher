@@ -123,8 +123,9 @@
   }
 
   async function start() {
-    // 新标签页创建时，后台复制结账会话可能稍晚于内容脚本启动。
-    for (let attempt = 0; attempt < 10; attempt++) {
+    // 新标签页的来源关联可能在内容脚本启动后才到达；后台唤醒或导航也可能较慢。
+    // 最多等待 30 秒，避免错过已经打开的支付宝页面。
+    for (let attempt = 0; attempt < 100; attempt++) {
       const flow = await chrome.runtime.sendMessage({ type: 'apw-get-checkout' });
       if (flow?.phase === 'order-submitted') { active = true; break; }
       await new Promise((resolve) => setTimeout(resolve, 300));

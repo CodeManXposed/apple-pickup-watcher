@@ -201,7 +201,7 @@ def replace_once(source, old, new):
     return source.replace(old, new)
 
 
-def test_extension_copy(destination, bridge_port, disable_tabs_handoff=False):
+def test_extension_copy(destination, bridge_port, disable_tabs_handoff=False, handoff_delay_ms=0):
     shutil.copytree(ROOT / "browser-extension", destination)
     manifest_path = destination / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
@@ -224,6 +224,13 @@ def test_extension_copy(destination, bridge_port, disable_tabs_handoff=False):
             background,
             "chrome.tabs.onCreated.addListener((tab) => {\n",
             "chrome.tabs.onCreated.addListener((tab) => {\n  return;\n",
+        )
+    if handoff_delay_ms:
+        background = replace_once(
+            background,
+            "flowFor(details.sourceTabId).then(async (flow) => {",
+            f"new Promise((resolve) => setTimeout(resolve, {handoff_delay_ms}))"
+            ".then(() => flowFor(details.sourceTabId)).then(async (flow) => {",
         )
     path.write_text(background)
     path = destination / "alipay-capture.js"
@@ -396,6 +403,7 @@ async def main():
             ("same tab", "cashier"), ("new tab", "cashier"), ("noopener tab", "cashier"),
             ("same tab", "late-qr"),
             ("same tab", "iframe-retry"),
+            ("noopener delayed tab", "qr"),
         ):
             PAGE_HITS.clear()
             BRIDGE_REQUESTS.clear()
@@ -418,6 +426,7 @@ async def main():
                     "same tab": "location.href='/alipay'",
                     "new tab": "window.open('/alipay', '_blank')",
                     "noopener tab": "window.open('/alipay', '_blank', 'noopener')",
+                    "noopener delayed tab": "window.open('/alipay', '_blank', 'noopener')",
                 }[navigation_mode],
             )
             with tempfile.TemporaryDirectory(prefix="apw-browser-smoke-") as directory:
@@ -426,7 +435,8 @@ async def main():
                 profile = base / "profile"
                 test_extension_copy(
                     extension, bridge.server_address[1],
-                    disable_tabs_handoff=navigation_mode == "noopener tab",
+                    disable_tabs_handoff=navigation_mode.startswith("noopener"),
+                    handoff_delay_ms=4000 if navigation_mode == "noopener delayed tab" else 0,
                 )
                 await run_browser(pages.server_address[1], extension, profile, navigation_mode, payment_mode)
     finally:

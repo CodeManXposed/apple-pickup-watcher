@@ -199,7 +199,7 @@ async function capture({ flow, nodes, now = 0 }) {
     window, document, URL, Date: clock,
     location: { href: alipay },
     chrome: { runtime: { async sendMessage(message) {
-      if (message.type === 'apw-get-checkout') return flow;
+      if (message.type === 'apw-get-checkout') return typeof flow === 'function' ? flow() : flow;
       sent.push(message);
       return { ok: true };
     } } },
@@ -223,6 +223,21 @@ test('captures the QR target encoded in a visible cashier image', async () => {
   assert.equal(sent.length, 1);
   assert.equal(sent[0].kind, 'qr');
   assert.equal(sent[0].url, qr);
+});
+
+test('captures a payment link when the new tab receives its checkout flow after the initial retries', async () => {
+  let attempts = 0;
+  const sent = await capture({
+    flow: () => ++attempts > 10 ? { phase: 'order-submitted' } : null,
+    nodes: [{
+      getClientRects() { return [1]; }, closest() { return null; },
+      getAttribute(key) { return key === 'data-url' ? 'https://qr.alipay.com/delayed-flow' : null; },
+    }],
+  });
+  assert.ok(attempts > 10);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, 'qr');
+  assert.equal(sent[0].url, 'https://qr.alipay.com/delayed-flow');
 });
 
 test('a separate Alipay visit never forwards a cashier or QR link', async () => {
