@@ -131,9 +131,12 @@
     }
     if (!active) return;
     await scan();
-    new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+    new MutationObserver((records) => {
+      if (records.some((record) => !record.target.closest?.('#apw-alipay-notice'))) schedule();
+    }).observe(document.documentElement, { childList: true, subtree: true, attributes: true });
     setTimeout(schedule, 5000);
-    if (topFrame) setInterval(schedule, 2000);
+    // 二维码可能只在内嵌帧里；桥接短暂失败后，该帧也必须能定时重试。
+    setInterval(schedule, 2000);
   }
   void start();
 })();

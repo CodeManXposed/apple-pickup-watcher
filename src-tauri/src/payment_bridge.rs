@@ -211,10 +211,10 @@ impl PaymentBridge {
 
     fn record(&self, link: PaymentLink, task_id: Option<&str>) -> bool {
         let mut current = self.latest.write().unwrap_or_else(|e| e.into_inner());
-        if current
-            .as_ref()
-            .is_some_and(|(old, old_task)| old.url == link.url && old_task.as_deref() == task_id)
-        {
+        if current.as_ref().is_some_and(|(old, old_task)| {
+            old_task.as_deref() == task_id
+                && (old.url == link.url || old.kind == "qr" && link.kind == "cashier")
+        }) {
             return false;
         }
         *current = Some((link, task_id.map(str::to_owned)));
@@ -928,6 +928,26 @@ mod tests {
         assert!(bridge.record(link.clone(), Some("first")));
         assert!(!bridge.record(link.clone(), Some("first")));
         assert!(bridge.record(link, Some("second")));
+    }
+
+    #[test]
+    fn cashier_fallback_cannot_replace_a_qr_from_the_same_task() {
+        let bridge = PaymentBridge::disabled();
+        let cashier = PaymentLink {
+            url: "https://excashier.alipay.com/payment.htm".into(),
+            kind: "cashier".into(),
+            received_at: 1,
+        };
+        let qr = PaymentLink {
+            url: "https://qr.alipay.com/test-code".into(),
+            kind: "qr".into(),
+            received_at: 2,
+        };
+        assert!(bridge.record(cashier.clone(), Some("task-one")));
+        assert!(bridge.record(qr.clone(), Some("task-one")));
+        assert!(!bridge.record(cashier.clone(), Some("task-one")));
+        assert_eq!(bridge.latest().unwrap().url, qr.url);
+        assert!(bridge.record(cashier, Some("task-two")));
     }
 
     #[tokio::test]

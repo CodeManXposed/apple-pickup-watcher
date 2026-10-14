@@ -29,6 +29,9 @@ STORE = "R683"
 QR = "https://qr.alipay.com/apw-local-test-only"
 PAGE_HITS = []
 BRIDGE_REQUESTS = []
+BRIDGE_RESPONSES = []
+LATEST_PAYMENT = None
+TEST_PAYMENT_MODE = ""
 
 PAGES = {
     "/shop/pdpAddToBag/MJYE4CH/A": '''<!doctype html><meta charset="utf-8"><title>测试商品</title>
@@ -71,6 +74,8 @@ PAGES = {
 现在下订单</button></section>''',
     "/alipay": f'''<!doctype html><meta charset="utf-8"><title>测试支付宝</title>
 <div data-url="{QR}" style="width:120px;height:120px">测试付款码</div>''',
+    "/alipay/frame": f'''<!doctype html><meta charset="utf-8"><title>测试支付宝内嵌帧</title>
+<div data-url="{QR}" style="width:120px;height:120px">测试付款码</div>''',
 }
 
 
@@ -106,16 +111,29 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        global LATEST_PAYMENT
         raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         payload = json.loads(raw)
         duplicate_order_stage = self.path == "/task-status" and payload.get("stage") == "orderSubmitted" and any(
             path == self.path and previous == payload for path, previous in BRIDGE_REQUESTS
         )
+        first_frame_qr = TEST_PAYMENT_MODE == "iframe-retry" and self.path == "/payment-link" and (
+            payload.get("kind") == "qr" and not any(
+                path == "/payment-link" and previous.get("kind") == "qr"
+                for path, previous in BRIDGE_REQUESTS
+            )
+        )
         BRIDGE_REQUESTS.append((self.path, payload))
         body = b'{"ok":true}'
         status = 401 if self.headers.get("Authorization") != "Bearer " + TOKEN else (
-            409 if duplicate_order_stage else 200
+            503 if first_frame_qr else 409 if duplicate_order_stage else 200
         )
+        BRIDGE_RESPONSES.append((self.path, payload, status))
+        if self.path == "/payment-link" and status == 200 and not (
+            LATEST_PAYMENT and LATEST_PAYMENT["taskId"] == payload["taskId"] and
+            LATEST_PAYMENT["kind"] == "qr" and payload["kind"] == "cashier"
+        ):
+            LATEST_PAYMENT = payload
         self.send_response(status)
         self.send_cors()
         self.send_header("Content-Length", str(len(body)))
@@ -304,11 +322,18 @@ async def run_browser(page_port, extension, profile, navigation_mode, payment_mo
             await browser.call("Page.navigate", {
                 "url": f"http://127.0.0.1:{page_port}/shop/pdpAddToBag/{PART}#{fragment}",
             })
-            expected_links = 2 if payment_mode == "late-qr" else 1
+            expected_links = 2 if payment_mode in ("late-qr", "iframe-retry") else 1
             await wait_until(
                 lambda: sum(path == "/payment-link" for path, _ in BRIDGE_REQUESTS) >= expected_links,
                 "local payment link after automatic fixture order",
             )
+            if payment_mode == "iframe-retry":
+                await wait_until(
+                    lambda: any(path == "/payment-link" and payload["kind"] == "cashier"
+                                for path, payload in BRIDGE_REQUESTS),
+                    "top-frame cashier fallback after iframe QR",
+                    timeout=10,
+                )
             contact = await browser.evaluate("JSON.parse(sessionStorage.getItem('apwSmokeResult'))")
             assert contact == {
                 "name": "Test Person", "phone": "13800138000",
@@ -319,22 +344,30 @@ async def run_browser(page_port, extension, profile, navigation_mode, payment_mo
                 "/shop/signIn", "/shop/checkout",
             ]
             assert [path for path in PAGE_HITS if path in PAGES][:5] == expected_pages, PAGE_HITS
-            assert [path for path in PAGE_HITS if path in PAGES][-1] == "/alipay", PAGE_HITS
+            assert "/alipay" in PAGE_HITS, PAGE_HITS
+            if payment_mode == "iframe-retry":
+                assert "/alipay/frame" in PAGE_HITS, PAGE_HITS
             payments = [payload for path, payload in BRIDGE_REQUESTS if path == "/payment-link"]
-            expected_kinds = ["cashier", "qr"] if payment_mode == "late-qr" else [
+            expected_kinds = ["qr", "qr", "cashier"] if payment_mode == "iframe-retry" else (
+                ["cashier", "qr"] if payment_mode == "late-qr" else [
                 "cashier" if payment_mode == "cashier" else "qr"
-            ]
+                ]
+            )
             assert [payment["kind"] for payment in payments] == expected_kinds, payments
+            if payment_mode == "iframe-retry":
+                responses = [status for path, _, status in BRIDGE_RESPONSES if path == "/payment-link"]
+                assert responses == [503, 200, 200], responses
             for payment in payments:
                 expected_url = QR if payment["kind"] == "qr" else f"http://127.0.0.1:{page_port}/alipay"
                 assert payment == {
                     "url": expected_url, "kind": payment["kind"], "partNumber": PART,
                     "storeNumber": STORE, "taskId": TASK,
                 }, payment
+            assert LATEST_PAYMENT["kind"] == ("cashier" if payment_mode == "cashier" else "qr"), LATEST_PAYMENT
             stages = [payload["stage"] for path, payload in BRIDGE_REQUESTS if path == "/task-status"]
             assert stages == ["bag", "checkout", "guest", "profile", "payment", "review"] + [
                 "orderSubmitted"
-            ] * expected_links, stages
+            ] * len(payments), stages
             print(f"Chrome extension smoke passed ({navigation_mode}, {payment_mode}): product → bag → guest checkout → Profile → capped fixture order → Alipay link bridge")
     finally:
         process.terminate()
@@ -345,6 +378,7 @@ async def run_browser(page_port, extension, profile, navigation_mode, payment_mo
 
 
 async def main():
+    global LATEST_PAYMENT, TEST_PAYMENT_MODE
     pages = ThreadingHTTPServer(("127.0.0.1", 0), PageHandler)
     bridge = ThreadingHTTPServer(("127.0.0.1", 0), BridgeHandler)
     threading.Thread(target=pages.serve_forever, daemon=True).start()
@@ -355,9 +389,13 @@ async def main():
             ("same tab", "qr"), ("new tab", "qr"), ("noopener tab", "qr"),
             ("same tab", "cashier"), ("new tab", "cashier"), ("noopener tab", "cashier"),
             ("same tab", "late-qr"),
+            ("same tab", "iframe-retry"),
         ):
             PAGE_HITS.clear()
             BRIDGE_REQUESTS.clear()
+            BRIDGE_RESPONSES.clear()
+            LATEST_PAYMENT = None
+            TEST_PAYMENT_MODE = payment_mode
             PAGES["/alipay"] = {
                 "qr": f'''<!doctype html><meta charset="utf-8"><title>测试支付宝</title>
 <div data-url="{QR}" style="width:120px;height:120px">测试付款码</div>''',
@@ -365,6 +403,8 @@ async def main():
                 "late-qr": f'''<!doctype html><meta charset="utf-8"><title>测试支付宝收银台</title>
 <script>setTimeout(() => {{ document.body.innerHTML =
 '<div data-url="{QR}" style="width:120px;height:120px">测试付款码</div>' }}, 6500)</script>''',
+                "iframe-retry": '''<!doctype html><meta charset="utf-8"><title>测试支付宝收银台</title>
+<iframe src="/alipay/frame" style="width:150px;height:150px"></iframe>''',
             }[payment_mode]
             PAGES["/shop/checkout"] = checkout.replace(
                 "location.href='/alipay'",
