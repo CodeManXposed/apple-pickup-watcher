@@ -696,6 +696,55 @@ fn cdp_call_with_session(
 /// Chrome 品牌版本从 137 起移除了 --load-extension；先装扩展再开页面。
 /// https://developer.chrome.com/blog/extension-news-june-2025
 /// 独立配置文件与调试端口都仅用于本应用，不触碰日常 Chrome。
+fn ensure_extension_loaded(
+    browser: &mut WebSocket<TcpStream>,
+    extension: &InstalledExtension,
+) -> Result<(), String> {
+    let existing = cdp_call(
+        browser,
+        1,
+        "Extensions.getExtensions",
+        serde_json::json!({}),
+    )?;
+    let extensions = existing
+        .get("extensions")
+        .and_then(Value::as_array)
+        .ok_or("浏览器未返回已安装扩展列表")?;
+    let path = extension.dir.to_str().ok_or("扩展安装路径包含无效字符")?;
+    if let Some(loaded) = extensions
+        .iter()
+        .find(|loaded| loaded.get("id").and_then(Value::as_str) == Some(&extension.id))
+    {
+        if loaded.get("enabled").and_then(Value::as_bool) != Some(true) {
+            return Err("独立浏览器中的扩展已停用；请先在浏览器扩展管理页启用它".into());
+        }
+        let same_path = loaded
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|loaded_path| {
+                loaded_path == path
+                    || matches!(
+                        (fs::canonicalize(loaded_path), fs::canonicalize(&extension.dir)),
+                        (Ok(actual), Ok(expected)) if actual == expected
+                    )
+            });
+        if same_path {
+            // 重复 loadUnpacked 会重载扩展，清空 storage.session 中的结账任务关联。
+            return Ok(());
+        }
+    }
+    let loaded = cdp_call(
+        browser,
+        1,
+        "Extensions.loadUnpacked",
+        serde_json::json!({"path": path}),
+    )?;
+    if loaded.get("id").and_then(Value::as_str) != Some(&extension.id) {
+        return Err("浏览器加载的扩展 ID 与原 Profile 不一致；已停止本次任务".into());
+    }
+    Ok(())
+}
+
 fn loaded_browser(app: &AppHandle) -> Result<(WebSocket<TcpStream>, InstalledExtension), String> {
     let platform = platform()?;
     let root = root(app)?;
@@ -705,16 +754,7 @@ fn loaded_browser(app: &AppHandle) -> Result<(WebSocket<TcpStream>, InstalledExt
     let profile = root.join("profile");
     fs::create_dir_all(&profile).map_err(|e| format!("建立浏览器资料目录失败：{e}"))?;
     let mut browser = browser_connection(&profile, &binary)?;
-    let path = extension.dir.to_str().ok_or("扩展安装路径包含无效字符")?;
-    let loaded = cdp_call(
-        &mut browser,
-        1,
-        "Extensions.loadUnpacked",
-        serde_json::json!({"path": path}),
-    )?;
-    if loaded.get("id").and_then(Value::as_str) != Some(&extension.id) {
-        return Err("浏览器加载的扩展 ID 与原 Profile 不一致；已停止本次任务".into());
-    }
+    ensure_extension_loaded(&mut browser, &extension)?;
     Ok((browser, extension))
 }
 
@@ -1069,14 +1109,27 @@ mod tests {
             assert!(Instant::now() < deadline, "Chrome did not open DevTools");
             thread::sleep(Duration::from_millis(100));
         };
-        let loaded = cdp_call(
+        ensure_extension_loaded(&mut socket, &installed).unwrap();
+        let extensions = cdp_call(
             &mut socket,
             1,
-            "Extensions.loadUnpacked",
-            serde_json::json!({"path": installed.dir.to_str().unwrap()}),
+            "Extensions.getExtensions",
+            serde_json::json!({}),
         )
         .unwrap();
-        assert_eq!(loaded["id"], installed.id);
+        assert!(
+            extensions["extensions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|extension| {
+                    extension["id"] == installed.id
+                        && fs::canonicalize(extension["path"].as_str().unwrap()).unwrap()
+                            == fs::canonicalize(&installed.dir).unwrap()
+                        && extension["enabled"] == true
+                }),
+            "{extensions:?}"
+        );
         assert!(
             checkout_storage(&mut socket, &installed.id)
                 .unwrap()
@@ -1175,6 +1228,34 @@ mod tests {
             &code,
         )
         .unwrap();
+        command_id += 1;
+        cdp_call_with_session(
+            &mut socket,
+            command_id,
+            "Extensions.setStorageItems",
+            serde_json::json!({
+                "id": installed.id,
+                "storageArea": "session",
+                "values": {"apwCheckoutFlow-test": {"phase": "checkout"}},
+            }),
+            Some(session),
+        )
+        .unwrap();
+        ensure_extension_loaded(&mut socket, &installed).unwrap();
+        command_id += 1;
+        let flow = cdp_call_with_session(
+            &mut socket,
+            command_id,
+            "Extensions.getStorageItems",
+            serde_json::json!({
+                "id": installed.id,
+                "storageArea": "session",
+                "keys": ["apwCheckoutFlow-test"],
+            }),
+            Some(session),
+        )
+        .unwrap();
+        assert_eq!(flow["data"]["apwCheckoutFlow-test"]["phase"], "checkout");
         drop(socket);
         drop(browser);
     }
