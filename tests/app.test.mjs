@@ -4,6 +4,7 @@ import { loadSource } from "./load-source.mjs";
 
 function renderApp() {
   const saved = [];
+  let browserOpens = 0;
   const addedTargets = [];
   const pushSaves = [];
   const state = {
@@ -27,6 +28,7 @@ function renderApp() {
     };
     if (specifier === "@/lib/store") return {
       watcherStore: { getSnapshot: () => state },
+      openBotBrowser: async () => { browserOpens++; },
       saveSettings: async (settings) => { saved.push(settings); state.settings = settings; },
       setTargets: async (targets) => { addedTargets.push(targets); },
       setCategory: (category) => { state.category = category; },
@@ -100,6 +102,8 @@ function renderApp() {
     taskSwitch: () => control((element) => element?.props?.id === "autoadd"),
     taskRows: () => all((element) => element?.type === "TableRow").length,
     profileSetupButton: () => control((element) => element?.type === "Button" && element.props.children === "准备独立浏览器"),
+    profileEditorButton: () => control((element) => element?.type === "Button" && element.props.children === "打开 Profile 编辑器"),
+    browserOpens: () => browserOpens,
     paymentLinks: () => all((element) => element?.type === "a" &&
       typeof element.props.href === "string" && element.props.href.includes("alipay.com"))
       .map((element) => element.props),
@@ -122,7 +126,9 @@ test("monitor, Profile, and task pages keep their controls separate", () => {
   assert.deepEqual(app.panelIds(), ["workspace-panel-profile"]);
   assert.equal(app.tab("profile")["aria-selected"], true);
   assert.equal(app.tab("monitor")["aria-selected"], false);
-  assert.equal(app.profileSetupButton().disabled, undefined);
+  assert.equal(app.profileSetupButton().disabled, false);
+  app.profileEditorButton().onClick();
+  assert.equal(app.browserOpens(), 1);
 
   app.tab("tasks").onClick();
   assert.deepEqual(app.panelIds(), ["workspace-panel-tasks"]);

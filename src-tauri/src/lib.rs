@@ -245,7 +245,7 @@ async fn prepare_bot_browser(
 
 #[tauri::command]
 fn open_bot_browser(app: AppHandle) -> Result<(), String> {
-    browser_bot::open_setup(&app)
+    browser_bot::open_profile(&app)
 }
 
 #[tauri::command]

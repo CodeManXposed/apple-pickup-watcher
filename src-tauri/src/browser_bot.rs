@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Manager};
 
@@ -76,6 +77,49 @@ fn root(app: &AppHandle) -> Result<PathBuf, String> {
         .app_local_data_dir()
         .map(|path| path.join("browser-bot"))
         .map_err(|e| format!("无法定位浏览器资料目录：{e}"))
+}
+
+fn extension_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let extension = app
+        .path()
+        .resolve("browser-extension", BaseDirectory::Resource)
+        .map_err(|e| format!("定位扩展失败：{e}"))?;
+    if !extension.join("manifest.json").is_file() {
+        return Err("应用包内缺少浏览器扩展".into());
+    }
+    Ok(extension)
+}
+
+/// Chromium 对无 manifest key 的解压扩展以路径的 SHA-256 前 16 字节生成 ID。
+/// 用启动参数里的同一条绝对路径，才能直接打开这份扩展自己的资料页面。
+fn extension_id(path: &Path) -> String {
+    #[cfg(windows)]
+    let bytes = {
+        use std::os::windows::ffi::OsStrExt;
+        let mut path_utf16: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if path_utf16.len() >= 2
+            && path_utf16[1] == u16::from(b':')
+            && (u16::from(b'a')..=u16::from(b'z')).contains(&path_utf16[0])
+        {
+            path_utf16[0] -= 32;
+        }
+        path_utf16
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
+    };
+    #[cfg(unix)]
+    let bytes = {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes().to_vec()
+    };
+    let hash = Sha256::digest(bytes);
+    let mut id = String::with_capacity(32);
+    for &byte in &hash[..16] {
+        id.push(char::from(b'a' + (byte >> 4)));
+        id.push(char::from(b'a' + (byte & 0x0f)));
+    }
+    id
 }
 
 fn current(root: &Path, platform: &str) -> Option<(String, PathBuf)> {
@@ -256,13 +300,7 @@ fn launch(app: &AppHandle, url: &str) -> Result<(), String> {
     let root = root(app)?;
     let (_, binary) =
         current(&root, platform).ok_or_else(|| "请先在 Profile 页准备独立浏览器".to_owned())?;
-    let extension = app
-        .path()
-        .resolve("browser-extension", BaseDirectory::Resource)
-        .map_err(|e| format!("定位扩展失败：{e}"))?;
-    if !extension.join("manifest.json").is_file() {
-        return Err("应用包内缺少浏览器扩展".into());
-    }
+    let extension = extension_dir(app)?;
     let profile = root.join("profile");
     fs::create_dir_all(&profile).map_err(|e| format!("建立浏览器资料目录失败：{e}"))?;
     Command::new(binary)
@@ -293,13 +331,23 @@ pub(crate) fn open_task(app: &AppHandle, url: &str) -> Result<(), String> {
     launch(app, url)
 }
 
-pub(crate) fn open_setup(app: &AppHandle) -> Result<(), String> {
-    launch(app, "chrome://extensions/")
+pub(crate) fn open_profile(app: &AppHandle) -> Result<(), String> {
+    let id = extension_id(&extension_dir(app)?);
+    launch(app, &format!("chrome-extension://{id}/profile.html"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn derives_chromium_unpacked_extension_id_from_its_launch_path() {
+        assert_eq!(
+            extension_id(Path::new("/tmp/apw-browser-extension")),
+            "kicnhjehhdlophpgfhejebhjgmpekapm"
+        );
+    }
 
     #[test]
     fn only_official_chrome_archive_is_accepted() {

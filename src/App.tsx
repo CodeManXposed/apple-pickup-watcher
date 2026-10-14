@@ -292,6 +292,18 @@ function LogLine({ line }: { line: string }) {
 export default function App() {
   const ui = useSyncExternalStore(watcherStore.subscribe, watcherStore.getSnapshot);
   const [activeTab, setActiveTab] = useState<WorkspaceTab>(readWorkspaceTab());
+  const [profileFeedback, setProfileFeedback] = useState("");
+  const [browserPreparing, setBrowserPreparing] = useState(false);
+
+  async function onPrepareBrowser() {
+    setBrowserPreparing(true);
+    setProfileFeedback("正在准备独立浏览器，请稍候…");
+    try {
+      setProfileFeedback(await prepareBotBrowser());
+    } finally {
+      setBrowserPreparing(false);
+    }
+  }
 
   function selectTab(tab: WorkspaceTab) {
     setActiveTab(tab);
@@ -1064,13 +1076,16 @@ export default function App() {
                   取货人和配送资料保存在独立 Chrome 的扩展中。在扩展的「结账资料设置」里编辑，资料不会写入桌面应用的监控配置。
                 </p>
                 <div className="mt-4 flex flex-wrap gap-2">
-                  <Button onClick={() => void prepareBotBrowser()}>准备独立浏览器</Button>
-                  <Button variant="secondary" onClick={() => void openBotBrowser()}>打开独立浏览器</Button>
-                  <Button variant="outline" onClick={() => void copyBridgePairingCode()}>复制扩展连接码</Button>
+                  <Button disabled={browserPreparing} onClick={() => void onPrepareBrowser()}>
+                    {browserPreparing ? "正在准备…" : "准备独立浏览器"}
+                  </Button>
+                  <Button variant="secondary" disabled={browserPreparing} onClick={() => void openBotBrowser().then(setProfileFeedback)}>打开 Profile 编辑器</Button>
+                  <Button variant="outline" onClick={() => void copyBridgePairingCode().then(setProfileFeedback)}>复制扩展连接码</Button>
                   <Button variant="ghost" onClick={() => void openExtensionFolder()}>查看扩展目录</Button>
                 </div>
+                {profileFeedback && <p className="mt-3 text-sm" role="status" aria-live="polite">{profileFeedback}</p>}
                 <p className="text-muted-foreground mt-3 text-xs">
-                  打开独立浏览器后，点工具栏的 Apple Pickup Watcher 扩展图标，再打开「结账资料设置」；将桌面连接码粘贴到扩展并保存。
+                  编辑器会在独立 Chrome 中直接打开；将桌面连接码粘贴到表单并保存。资料只留在该浏览器的扩展存储中。
                 </p>
               </section>
 

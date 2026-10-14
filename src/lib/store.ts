@@ -392,32 +392,44 @@ export async function openExtensionFolder(): Promise<void> {
   }
 }
 
-export async function prepareBotBrowser(): Promise<void> {
+export async function prepareBotBrowser(): Promise<string> {
   try {
     pushLog("正在下载并准备独立 Chrome for Testing，请稍候…");
     const ready = await invoke<{ version: string }>("prepare_bot_browser");
-    pushLog(`独立浏览器已就绪：Chrome for Testing ${ready.version}。`);
+    const message = `独立浏览器已就绪：Chrome for Testing ${ready.version}。`;
+    pushLog(message);
+    return message;
   } catch (err) {
-    pushLog(`准备独立浏览器失败：${String(err)}`);
+    const message = `准备独立浏览器失败：${String(err)}`;
+    pushLog(message);
+    return message;
   }
 }
 
-export async function openBotBrowser(): Promise<void> {
+export async function openBotBrowser(): Promise<string> {
   try {
     await invoke("open_bot_browser");
-    pushLog("已打开独立浏览器；请在扩展中设置取货和配送资料。");
+    const message = "已请求在独立浏览器打开 Profile 编辑器；请填写资料并保存。";
+    pushLog(message);
+    return message;
   } catch (err) {
-    pushLog(`打开独立浏览器失败：${String(err)}`);
+    const message = `打开 Profile 编辑器失败：${String(err)}`;
+    pushLog(message);
+    return message;
   }
 }
 
-export async function copyBridgePairingCode(): Promise<void> {
+export async function copyBridgePairingCode(): Promise<string> {
   try {
     const code = await invoke<string>("get_bridge_pairing_code");
     await navigator.clipboard.writeText(code);
-    pushLog("已复制扩展连接码，请粘贴到 Chrome 扩展的结账资料设置中。");
+    const message = "已复制扩展连接码，请粘贴到 Chrome 扩展的结账资料设置中。";
+    pushLog(message);
+    return message;
   } catch (err) {
-    pushLog(`复制扩展连接码失败：${String(err)}`);
+    const message = `复制扩展连接码失败：${String(err)}`;
+    pushLog(message);
+    return message;
   }
 }
 
