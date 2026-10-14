@@ -380,6 +380,25 @@ export async function openExtensionFolder(): Promise<void> {
   }
 }
 
+export async function prepareBotBrowser(): Promise<void> {
+  try {
+    pushLog("正在下载并准备独立 Chrome for Testing，请稍候…");
+    const ready = await invoke<{ version: string }>("prepare_bot_browser");
+    pushLog(`独立浏览器已就绪：Chrome for Testing ${ready.version}。`);
+  } catch (err) {
+    pushLog(`准备独立浏览器失败：${String(err)}`);
+  }
+}
+
+export async function openBotBrowser(): Promise<void> {
+  try {
+    await invoke("open_bot_browser");
+    pushLog("已打开独立浏览器；请在扩展中设置取货和配送资料。");
+  } catch (err) {
+    pushLog(`打开独立浏览器失败：${String(err)}`);
+  }
+}
+
 export async function copyBridgePairingCode(): Promise<void> {
   try {
     const code = await invoke<string>("get_bridge_pairing_code");

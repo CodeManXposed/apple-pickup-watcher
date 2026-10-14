@@ -58,7 +58,9 @@ import {
   copyPaymentLink,
   dismissUpdate,
   installUpdate,
+  openBotBrowser,
   openExtensionFolder,
+  prepareBotBrowser,
   refreshProducts,
   saveSettings,
   setCategory,
@@ -788,12 +790,18 @@ export default function App() {
                       void saveSettings({ ...ui.settings, autoAddToBag: v })
                     }
                   />
-                  <Label htmlFor="autoadd">有货时自动加车</Label>
+                  <Label htmlFor="autoadd">有货时在独立浏览器自动加车</Label>
                   <span className="text-muted-foreground text-xs">
-                    安装配套 Chrome 扩展后，可在扩展图标中设置结账资料
+                    先准备专用浏览器，再在其中的扩展设置结账资料
                   </span>
+                  <Button variant="outline" size="sm" onClick={() => void prepareBotBrowser()}>
+                    准备独立浏览器
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => void openBotBrowser()}>
+                    打开独立浏览器
+                  </Button>
                   <Button variant="outline" size="sm" onClick={() => void openExtensionFolder()}>
-                    打开扩展目录
+                    查看扩展目录
                   </Button>
                   <Button variant="outline" size="sm" onClick={() => void copyBridgePairingCode()}>
                     复制扩展连接码

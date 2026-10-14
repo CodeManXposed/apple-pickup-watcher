@@ -24,6 +24,7 @@ use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use tauri_plugin_updater::UpdaterExt;
 
 mod auto_open;
+mod browser_bot;
 mod notification_queue;
 mod payment_bridge;
 
@@ -63,6 +64,7 @@ struct AppState {
     client: AppleClient,
     catalog: Catalog,
     http: reqwest::Client,
+    browser_install: tokio::sync::Mutex<()>,
     /// 设置的内存副本。写盘失败不该让界面卡住，所以内存副本是权威的展示来源。
     settings: RwLock<Settings>,
     /// 为 `None` 表示配置不可持久化（目录不可写，或上次读取失败已放弃写盘）。
@@ -175,6 +177,20 @@ fn open_extension_folder(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn prepare_bot_browser(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<browser_bot::BrowserReady, String> {
+    let _install = state.browser_install.lock().await;
+    browser_bot::prepare(&app, &state.http).await
+}
+
+#[tauri::command]
+fn open_bot_browser(app: AppHandle) -> Result<(), String> {
+    browser_bot::open_setup(&app)
+}
+
+#[tauri::command]
 async fn save_settings(
     state: tauri::State<'_, AppState>,
     settings: Settings,
@@ -248,7 +264,10 @@ async fn set_interval(state: tauri::State<'_, AppState>, seconds: u64) -> Result
 }
 
 #[tauri::command]
-async fn start_watching(state: tauri::State<'_, AppState>) -> Result<(), String> {
+async fn start_watching(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    if state.settings_snapshot().auto_add_to_bag {
+        browser_bot::ready(&app)?;
+    }
     state.watcher.start().await;
     Ok(())
 }
@@ -457,14 +476,26 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
             }
 
             use tauri_plugin_opener::OpenerExt;
-            if let Err(err) = auto_open_bag.open_if_needed(
-                settings.open_bag_on_hit || settings.auto_add_to_bag,
-                &target.locale,
-                settings
-                    .auto_add_to_bag
-                    .then_some((target.part_number.as_str(), target.store_number.as_str())),
-                |url| app.opener().open_url(url, None::<&str>),
-            ) {
+            let open_result = if settings.auto_add_to_bag {
+                auto_open_bag.open_if_needed(
+                    true,
+                    &target.locale,
+                    Some((target.part_number.as_str(), target.store_number.as_str())),
+                    |url| browser_bot::open_task(&app, url),
+                )
+            } else {
+                auto_open_bag.open_if_needed(
+                    settings.open_bag_on_hit,
+                    &target.locale,
+                    None,
+                    |url| {
+                        app.opener()
+                            .open_url(url, None::<&str>)
+                            .map_err(|e| e.to_string())
+                    },
+                )
+            };
+            if let Err(err) = open_result {
                 let _ = app.emit(NOTICE_CHANNEL, format!("打开购买页面失败：{err}"));
             }
 
@@ -634,6 +665,7 @@ pub fn run() {
                 client,
                 catalog,
                 http: reqwest::Client::new(),
+                browser_install: tokio::sync::Mutex::new(()),
                 settings: RwLock::new(settings),
                 store,
             });
@@ -678,6 +710,8 @@ pub fn run() {
             get_bridge_pairing_code,
             get_payment_link,
             open_extension_folder,
+            prepare_bot_browser,
+            open_bot_browser,
             save_settings,
             set_push_urls,
             get_snapshot,
