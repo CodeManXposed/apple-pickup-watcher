@@ -86,6 +86,21 @@ test('matching iPhone SKU chooses required options, clicks official add once, th
   assert.equal(p.storage.size, 0);
 });
 
+test('pickup area survives product to bag navigation', () => {
+  const hash = `#apw-auto-add=MJYE4CH%2FA&apw-store=R683&apw-task=${taskId}` +
+    '&apw-province=%E4%B8%8A%E6%B5%B7&apw-city=%E4%B8%8A%E6%B5%B7&apw-district=%E6%99%AE%E9%99%80%E5%8C%BA';
+  const p = page({ hash, add: control() });
+  p.location.pathname = '/shop/buy-iphone/iphone-18-pro';
+  p.location.search = '?product=mjye4ch/a&step=attach';
+  p.tick();
+  const bag = new URL(p.location.assigned);
+  const checkout = new URLSearchParams(bag.hash.slice(1));
+  assert.equal(checkout.get('apw-store'), 'R683');
+  assert.equal(checkout.get('apw-province'), '上海');
+  assert.equal(checkout.get('apw-city'), '上海');
+  assert.equal(checkout.get('apw-district'), '普陀区');
+});
+
 test('invalid marker and mismatched SKU never click add', () => {
   const invalid = page({ hash: '#apw-auto-add=MJYE4CH%2FA&apw-store=%3Cbad%3E' });
   invalid.tick();

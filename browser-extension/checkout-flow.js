@@ -202,7 +202,10 @@
     if (!clickedSteps.has('pickup-timeslot')) {
       clickedSteps.add('pickup-timeslot');
       notice('正在选择最早可用取货时段…');
-      select.value = earliest.value;
+      const setter = typeof HTMLSelectElement === 'undefined' ? null :
+        Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+      if (setter) setter.call(select, earliest.value);
+      else select.value = earliest.value;
       select.dispatchEvent(new Event('input', { bubbles: true }));
       select.dispatchEvent(new Event('change', { bubbles: true }));
     }

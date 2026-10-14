@@ -535,7 +535,7 @@ fn valid_task_id(value: &str) -> bool {
 }
 
 fn link_matches_task(link: &IncomingLink, status: Option<&BotStatus>) -> bool {
-    status.is_none_or(|status| {
+    status.is_some_and(|status| {
         link.part_number.as_deref() == Some(status.part_number.as_str())
             && link.store_number.as_deref() == Some(status.store_number.as_str())
             && link.task_id.as_deref() == Some(status.task_id.as_str())
@@ -562,13 +562,23 @@ async fn send_discord(app: AppHandle, link: PaymentLink) {
         },
     )
     .with_url(link.url);
+    let mut delivered = 0;
     for discord in Discord::from_list(&settings.discord_webhook, state.http.clone()) {
-        if let Err(err) = discord.notify(&notification).await {
-            let _ = app.emit(
-                NOTICE_CHANNEL,
-                format!("支付宝链接发送到 Discord 失败：{err}"),
-            );
+        match discord.notify(&notification).await {
+            Ok(()) => delivered += 1,
+            Err(err) => {
+                let _ = app.emit(
+                    NOTICE_CHANNEL,
+                    format!("支付宝链接发送到 Discord 失败：{err}"),
+                );
+            }
         }
+    }
+    if delivered > 0 {
+        let _ = app.emit(
+            NOTICE_CHANNEL,
+            format!("支付宝链接已发送到 {delivered} 个 Discord webhook"),
+        );
     }
 }
 
@@ -673,6 +683,7 @@ mod tests {
             store_number: Some("R683".into()),
             task_id: Some(first_id.clone()),
         };
+        assert!(!link_matches_task(&link, None));
         assert!(!link_matches_task(&link, bridge.status().as_ref()));
         bridge.advance_task("orderSubmitted", "MJYE4CH/A", "R683", &first_id);
         assert!(link_matches_task(&link, bridge.status().as_ref()));

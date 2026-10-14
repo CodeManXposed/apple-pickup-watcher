@@ -88,6 +88,23 @@ test('marked bag clicks the official checkout button once', async () => {
   assert.equal(result.history.url, '/shop/bag');
 });
 
+test('bag binds pickup area to the checkout task', async () => {
+  const checkout = button('结账', {});
+  const item = { href: 'https://www.apple.com.cn/shop/product/mjye4ch/a',
+    closest() { return { querySelector() { return { value: '1' }; } }; } };
+  const params = new URLSearchParams({
+    'apw-checkout': '1', 'apw-store': 'R683', 'apw-part': 'MJYE4CH/A',
+    'apw-task': taskId, 'apw-province': '上海', 'apw-city': '上海', 'apw-district': '普陀区',
+  });
+  const result = await page({
+    pathname: '/shop/bag', hash: `#${params}`, official: [checkout],
+    selectors: { '[data-autom="bag-item-name"]': [item] },
+  });
+  const started = result.sent.find((message) => message.type === 'apw-begin-checkout');
+  assert.equal(started.area.province, '上海');
+  assert.equal(started.area.district, '普陀区');
+});
+
 test('bag without the exact target SKU does not enter checkout', async () => {
   const checkout = button('结账', {});
   const result = await page({
