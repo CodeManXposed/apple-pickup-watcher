@@ -3,8 +3,12 @@
 
 use std::fs::{self, File};
 use std::io::Write;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -12,9 +16,12 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Manager};
+use tungstenite::{Message, WebSocket};
 
 const RELEASES_URL: &str = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
 const VERSION_FILE: &str = "current-version";
+const DEVTOOLS_FILE: &str = "DevToolsActivePort";
+static BROWSER_LAUNCH: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Deserialize)]
 struct Releases {
@@ -563,8 +570,146 @@ pub(crate) async fn prepare(
     result
 }
 
-/// 在独立配置文件里打开一个购买任务。启动参数不会触碰用户日常 Chrome 的资料。
+fn devtools_endpoint(profile: &Path) -> Option<(SocketAddr, String)> {
+    let contents = fs::read_to_string(profile.join(DEVTOOLS_FILE)).ok()?;
+    let mut lines = contents.lines();
+    let port = lines.next()?.parse::<u16>().ok()?;
+    if port == 0 {
+        return None;
+    }
+    let path = lines.next()?;
+    let id = path.strip_prefix("/devtools/browser/")?;
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+    {
+        return None;
+    }
+    Some((
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+        path.to_owned(),
+    ))
+}
+
+fn connect_devtools(profile: &Path) -> Result<WebSocket<TcpStream>, String> {
+    let (address, path) =
+        devtools_endpoint(profile).ok_or_else(|| "独立浏览器尚未开放调试连接".to_owned())?;
+    let stream = TcpStream::connect_timeout(&address, Duration::from_secs(1))
+        .map_err(|e| format!("连接独立浏览器失败：{e}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("设置浏览器读取超时失败：{e}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("设置浏览器写入超时失败：{e}"))?;
+    let url = format!("ws://127.0.0.1:{}{path}", address.port());
+    tungstenite::client(url, stream)
+        .map(|(socket, _)| socket)
+        .map_err(|e| format!("连接浏览器调试协议失败：{e}"))
+}
+
+fn browser_connection(profile: &Path, binary: &Path) -> Result<WebSocket<TcpStream>, String> {
+    if devtools_endpoint(profile).is_some() {
+        for _ in 0..10 {
+            if let Ok(socket) = connect_devtools(profile) {
+                return Ok(socket);
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+    // 旧版本可能留下已失效的端口文件；启动前清掉，避免连到别的本机进程。
+    let _ = fs::remove_file(profile.join(DEVTOOLS_FILE));
+    let mut child = Command::new(binary)
+        .arg(format!("--user-data-dir={}", profile.display()))
+        .arg("--remote-debugging-address=127.0.0.1")
+        .arg("--remote-debugging-port=0")
+        .arg("--enable-unsafe-extension-debugging")
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("about:blank")
+        .spawn()
+        .map_err(|e| format!("启动独立浏览器失败：{e}"))?;
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let mut exited_at = None;
+    while Instant::now() < deadline {
+        if let Ok(socket) = connect_devtools(profile) {
+            return Ok(socket);
+        }
+        if exited_at.is_none() && child.try_wait().ok().flatten().is_some() {
+            exited_at = Some(Instant::now());
+        }
+        if exited_at.is_some_and(|at| at.elapsed() > Duration::from_secs(2)) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    Err("无法连接独立浏览器；如已打开旧版独立 Chrome，请先关闭它再重试".into())
+}
+
+fn cdp_call(
+    socket: &mut WebSocket<TcpStream>,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> Result<Value, String> {
+    cdp_call_with_session(socket, id, method, params, None)
+}
+
+fn cdp_call_with_session(
+    socket: &mut WebSocket<TcpStream>,
+    id: u64,
+    method: &str,
+    params: Value,
+    session: Option<&str>,
+) -> Result<Value, String> {
+    let mut command = serde_json::json!({"id": id, "method": method, "params": params});
+    if let Some(session) = session {
+        command["sessionId"] = Value::String(session.to_owned());
+    }
+    socket
+        .send(Message::Text(command.to_string().into()))
+        .map_err(|e| format!("向浏览器发送命令失败：{e}"))?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if Instant::now() >= deadline {
+            return Err(format!("等待浏览器执行 {method} 超时"));
+        }
+        let message = socket
+            .read()
+            .map_err(|e| format!("等待浏览器响应失败：{e}"))?;
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let response: Value =
+            serde_json::from_str(&text).map_err(|e| format!("解析浏览器响应失败：{e}"))?;
+        if response.get("id").and_then(Value::as_u64) != Some(id) {
+            continue;
+        }
+        if let Some(error) = response.get("error") {
+            return Err(format!(
+                "浏览器拒绝 {method}：{}",
+                error["message"].as_str().unwrap_or("未知错误")
+            ));
+        }
+        return response
+            .get("result")
+            .cloned()
+            .ok_or_else(|| format!("浏览器未返回 {method} 的结果"));
+    }
+}
+
+/// Chrome 品牌版本从 137 起移除了 --load-extension；先装扩展再开页面。
+/// https://developer.chrome.com/blog/extension-news-june-2025
+/// 独立配置文件与调试端口都仅用于本应用，不触碰日常 Chrome。
 fn launch(app: &AppHandle, task_url: Option<&str>) -> Result<(), String> {
+    let _guard = BROWSER_LAUNCH
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let platform = platform()?;
     let root = root(app)?;
     let (_, binary) =
@@ -575,18 +720,26 @@ fn launch(app: &AppHandle, task_url: Option<&str>) -> Result<(), String> {
         .unwrap_or_else(|| format!("chrome-extension://{}/profile.html", extension.id));
     let profile = root.join("profile");
     fs::create_dir_all(&profile).map_err(|e| format!("建立浏览器资料目录失败：{e}"))?;
-    Command::new(binary)
-        .arg(format!("--user-data-dir={}", profile.display()))
-        .arg(format!(
-            "--disable-extensions-except={}",
-            extension.dir.display()
-        ))
-        .arg(format!("--load-extension={}", extension.dir.display()))
-        .arg("--no-first-run")
-        .arg("--no-default-browser-check")
-        .arg(&url)
-        .spawn()
-        .map_err(|e| format!("启动独立浏览器失败：{e}"))?;
+    let mut browser = browser_connection(&profile, &binary)?;
+    let path = extension.dir.to_str().ok_or("扩展安装路径包含无效字符")?;
+    let loaded = cdp_call(
+        &mut browser,
+        1,
+        "Extensions.loadUnpacked",
+        serde_json::json!({"path": path}),
+    )?;
+    if loaded.get("id").and_then(Value::as_str) != Some(&extension.id) {
+        return Err("浏览器加载的扩展 ID 与原 Profile 不一致；已停止本次任务".into());
+    }
+    let created = cdp_call(
+        &mut browser,
+        2,
+        "Target.createTarget",
+        serde_json::json!({"url": url}),
+    )?;
+    if created.get("targetId").and_then(Value::as_str).is_none() {
+        return Err("浏览器未打开购买页面".into());
+    }
     Ok(())
 }
 
@@ -744,6 +897,96 @@ mod tests {
             fs::read_to_string(storage.join("sentinel")).unwrap(),
             "saved profile"
         );
+    }
+
+    #[test]
+    #[ignore = "requires APW_CHROME_FOR_TESTING and starts a disposable headless browser"]
+    fn chrome_devtools_loads_the_real_profile_page() {
+        struct Browser(std::process::Child);
+        impl Drop for Browser {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let binary = std::env::var_os("APW_CHROME_FOR_TESTING")
+            .map(PathBuf::from)
+            .expect("set APW_CHROME_FOR_TESTING to the Chrome for Testing executable");
+        let temp = tempfile::tempdir().unwrap();
+        let bundled = Path::new(env!("CARGO_MANIFEST_DIR")).join("../browser-extension");
+        let installed = install_extension(&temp.path().join("bot"), &bundled).unwrap();
+        let profile = temp.path().join("profile");
+        let browser = Browser(
+            Command::new(binary)
+                .arg("--headless=new")
+                .arg("--remote-debugging-address=127.0.0.1")
+                .arg("--remote-debugging-port=0")
+                .arg("--enable-unsafe-extension-debugging")
+                .arg("--no-first-run")
+                .arg("--no-default-browser-check")
+                .arg(format!("--user-data-dir={}", profile.display()))
+                .arg("about:blank")
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut socket = loop {
+            if let Ok(socket) = connect_devtools(&profile) {
+                break socket;
+            }
+            assert!(Instant::now() < deadline, "Chrome did not open DevTools");
+            thread::sleep(Duration::from_millis(100));
+        };
+        let loaded = cdp_call(
+            &mut socket,
+            1,
+            "Extensions.loadUnpacked",
+            serde_json::json!({"path": installed.dir.to_str().unwrap()}),
+        )
+        .unwrap();
+        assert_eq!(loaded["id"], installed.id);
+        let created = cdp_call(
+            &mut socket,
+            2,
+            "Target.createTarget",
+            serde_json::json!({"url": format!("chrome-extension://{}/profile.html", installed.id)}),
+        )
+        .unwrap();
+        let attached = cdp_call(
+            &mut socket,
+            3,
+            "Target.attachToTarget",
+            serde_json::json!({"targetId": created["targetId"], "flatten": true}),
+        )
+        .unwrap();
+        let session = attached["sessionId"].as_str().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut command_id = 4;
+        loop {
+            let result = cdp_call_with_session(
+                &mut socket,
+                command_id,
+                "Runtime.evaluate",
+                serde_json::json!({
+                    "expression": "Boolean(document.getElementById('profile-form'))",
+                    "returnByValue": true,
+                }),
+                Some(session),
+            );
+            if result
+                .ok()
+                .and_then(|value| value.pointer("/result/value").cloned())
+                == Some(Value::Bool(true))
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "Profile page did not load");
+            command_id += 1;
+            thread::sleep(Duration::from_millis(100));
+        }
+        drop(socket);
+        drop(browser);
     }
 
     #[test]

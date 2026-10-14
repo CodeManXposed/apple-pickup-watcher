@@ -240,8 +240,10 @@ async fn prepare_bot_browser(
 }
 
 #[tauri::command]
-fn open_bot_browser(app: AppHandle) -> Result<(), String> {
-    browser_bot::open_profile(&app)
+async fn open_bot_browser(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || browser_bot::open_profile(&app))
+        .await
+        .map_err(|e| format!("启动浏览器任务中断：{e}"))?
 }
 
 #[tauri::command]
