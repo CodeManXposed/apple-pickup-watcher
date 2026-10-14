@@ -3,7 +3,7 @@
   "name": "Apple Pickup Watcher",
   "version": "0.3.1",
   "description": "自动加车、进入结账，并填充本机保存的取货及配送资料。",
-  "permissions": ["storage"],
+  "permissions": ["storage", "webNavigation"],
   "host_permissions": ["http://127.0.0.1:43849/*"],
   "background": { "service_worker": "background.js" },
   "action": {

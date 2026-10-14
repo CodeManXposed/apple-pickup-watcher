@@ -236,6 +236,20 @@ chrome.tabs.onCreated.addListener((tab) => {
   }).catch(() => {});
 });
 
+// Apple 可能用 noopener 打开支付宝，此时新标签没有 openerTabId。
+// 导航事件仍带来源标签页，只接纳从本次结账产生的支付宝导航。
+chrome.webNavigation.onCreatedNavigationTarget.addListener((details) => {
+  if (!Number.isInteger(details.tabId) || !Number.isInteger(details.sourceTabId) ||
+      !alipayPage(details.url)) return;
+  flowFor(details.sourceTabId).then(async (flow) => {
+    if (!flow || !['guest-clicked', 'order-submitted'].includes(flow.phase)) return;
+    await chrome.storage.session.set({
+      [`${PARENT_PREFIX}${details.tabId}`]: details.sourceTabId,
+      [`${FLOW_PREFIX}${details.tabId}`]: flow,
+    });
+  }).catch(() => {});
+});
+
 chrome.tabs.onRemoved.addListener((tabId) => {
   chrome.storage.session.remove(`${FLOW_PREFIX}${tabId}`).catch(() => {});
   chrome.storage.session.remove(`${PARENT_PREFIX}${tabId}`).catch(() => {});

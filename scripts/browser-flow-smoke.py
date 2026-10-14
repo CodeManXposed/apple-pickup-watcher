@@ -108,9 +108,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         payload = json.loads(raw)
+        duplicate_order_stage = self.path == "/task-status" and payload.get("stage") == "orderSubmitted" and any(
+            path == self.path and previous == payload for path, previous in BRIDGE_REQUESTS
+        )
         BRIDGE_REQUESTS.append((self.path, payload))
         body = b'{"ok":true}'
-        self.send_response(200 if self.headers.get("Authorization") == "Bearer " + TOKEN else 401)
+        status = 401 if self.headers.get("Authorization") != "Bearer " + TOKEN else (
+            409 if duplicate_order_stage else 200
+        )
+        self.send_response(status)
         self.send_cors()
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -177,7 +183,7 @@ def replace_once(source, old, new):
     return source.replace(old, new)
 
 
-def test_extension_copy(destination, bridge_port):
+def test_extension_copy(destination, bridge_port, disable_tabs_handoff=False):
     shutil.copytree(ROOT / "browser-extension", destination)
     manifest_path = destination / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
@@ -194,7 +200,25 @@ def test_extension_copy(destination, bridge_port):
     background = replace_once(background, marker, marker + "\n    if (parsed.protocol === 'http:' && parsed.hostname === '127.0.0.1' && parsed.pathname.startsWith('/shop/')) return true;")
     marker = "function alipayPage(url) {\n  try {\n    const parsed = new URL(url);"
     background = replace_once(background, marker, marker + "\n    if (parsed.protocol === 'http:' && parsed.hostname === '127.0.0.1' && parsed.pathname.startsWith('/alipay')) return true;")
+    if disable_tabs_handoff:
+        # Make the real Chrome navigation event the only route for this case.
+        background = replace_once(
+            background,
+            "chrome.tabs.onCreated.addListener((tab) => {\n",
+            "chrome.tabs.onCreated.addListener((tab) => {\n  return;\n",
+        )
     path.write_text(background)
+    path = destination / "alipay-capture.js"
+    capture = path.read_text()
+    marker = "const url = new URL(value, location.href);\n      return url.protocol === 'https:'"
+    capture = replace_once(
+        capture, marker,
+        "const url = new URL(value, location.href);\n"
+        "      if (url.protocol === 'http:' && url.hostname === '127.0.0.1' && "
+        "url.pathname.startsWith('/alipay')) return url.href;\n"
+        "      return url.protocol === 'https:'",
+    )
+    path.write_text(capture)
     path = destination / "checkout-flow.js"
     checkout = path.read_text()
     checkout = replace_once(
@@ -214,7 +238,7 @@ async def wait_until(predicate, label, timeout=20):
     raise TimeoutError(f"timed out waiting for {label}; last bridge calls: {BRIDGE_REQUESTS[-10:]}")
 
 
-async def run_browser(page_port, extension, profile, popup):
+async def run_browser(page_port, extension, profile, navigation_mode, payment_mode):
     command = [
         str(chrome_binary()), "--headless=new", "--remote-debugging-port=0",
         "--remote-allow-origins=*", "--disable-background-networking",
@@ -280,8 +304,9 @@ async def run_browser(page_port, extension, profile, popup):
             await browser.call("Page.navigate", {
                 "url": f"http://127.0.0.1:{page_port}/shop/pdpAddToBag/{PART}#{fragment}",
             })
+            expected_links = 2 if payment_mode == "late-qr" else 1
             await wait_until(
-                lambda: any(path == "/payment-link" for path, _ in BRIDGE_REQUESTS),
+                lambda: sum(path == "/payment-link" for path, _ in BRIDGE_REQUESTS) >= expected_links,
                 "local payment link after automatic fixture order",
             )
             contact = await browser.evaluate("JSON.parse(sessionStorage.getItem('apwSmokeResult'))")
@@ -295,15 +320,22 @@ async def run_browser(page_port, extension, profile, popup):
             ]
             assert [path for path in PAGE_HITS if path in PAGES][:5] == expected_pages, PAGE_HITS
             assert [path for path in PAGE_HITS if path in PAGES][-1] == "/alipay", PAGE_HITS
-            payment = next(payload for path, payload in BRIDGE_REQUESTS if path == "/payment-link")
-            assert payment == {
-                "url": QR, "kind": "qr", "partNumber": PART,
-                "storeNumber": STORE, "taskId": TASK,
-            }, payment
+            payments = [payload for path, payload in BRIDGE_REQUESTS if path == "/payment-link"]
+            expected_kinds = ["cashier", "qr"] if payment_mode == "late-qr" else [
+                "cashier" if payment_mode == "cashier" else "qr"
+            ]
+            assert [payment["kind"] for payment in payments] == expected_kinds, payments
+            for payment in payments:
+                expected_url = QR if payment["kind"] == "qr" else f"http://127.0.0.1:{page_port}/alipay"
+                assert payment == {
+                    "url": expected_url, "kind": payment["kind"], "partNumber": PART,
+                    "storeNumber": STORE, "taskId": TASK,
+                }, payment
             stages = [payload["stage"] for path, payload in BRIDGE_REQUESTS if path == "/task-status"]
-            assert stages == ["bag", "checkout", "guest", "profile", "payment", "review", "orderSubmitted"], stages
-            mode = "new tab" if popup else "same tab"
-            print(f"Chrome extension smoke passed ({mode}): product → bag → guest checkout → Profile → capped fixture order → Alipay QR bridge")
+            assert stages == ["bag", "checkout", "guest", "profile", "payment", "review"] + [
+                "orderSubmitted"
+            ] * expected_links, stages
+            print(f"Chrome extension smoke passed ({navigation_mode}, {payment_mode}): product → bag → guest checkout → Profile → capped fixture order → Alipay link bridge")
     finally:
         process.terminate()
         try:
@@ -319,19 +351,38 @@ async def main():
     threading.Thread(target=bridge.serve_forever, daemon=True).start()
     try:
         checkout = PAGES["/shop/checkout"]
-        for popup in (False, True):
+        for navigation_mode, payment_mode in (
+            ("same tab", "qr"), ("new tab", "qr"), ("noopener tab", "qr"),
+            ("same tab", "cashier"), ("new tab", "cashier"), ("noopener tab", "cashier"),
+            ("same tab", "late-qr"),
+        ):
             PAGE_HITS.clear()
             BRIDGE_REQUESTS.clear()
+            PAGES["/alipay"] = {
+                "qr": f'''<!doctype html><meta charset="utf-8"><title>测试支付宝</title>
+<div data-url="{QR}" style="width:120px;height:120px">测试付款码</div>''',
+                "cashier": '<!doctype html><meta charset="utf-8"><title>测试支付宝收银台</title>',
+                "late-qr": f'''<!doctype html><meta charset="utf-8"><title>测试支付宝收银台</title>
+<script>setTimeout(() => {{ document.body.innerHTML =
+'<div data-url="{QR}" style="width:120px;height:120px">测试付款码</div>' }}, 6500)</script>''',
+            }[payment_mode]
             PAGES["/shop/checkout"] = checkout.replace(
                 "location.href='/alipay'",
-                "window.open('/alipay', '_blank')" if popup else "location.href='/alipay'",
+                {
+                    "same tab": "location.href='/alipay'",
+                    "new tab": "window.open('/alipay', '_blank')",
+                    "noopener tab": "window.open('/alipay', '_blank', 'noopener')",
+                }[navigation_mode],
             )
             with tempfile.TemporaryDirectory(prefix="apw-browser-smoke-") as directory:
                 base = Path(directory)
                 extension = base / "extension"
                 profile = base / "profile"
-                test_extension_copy(extension, bridge.server_address[1])
-                await run_browser(pages.server_address[1], extension, profile, popup)
+                test_extension_copy(
+                    extension, bridge.server_address[1],
+                    disable_tabs_handoff=navigation_mode == "noopener tab",
+                )
+                await run_browser(pages.server_address[1], extension, profile, navigation_mode, payment_mode)
     finally:
         pages.shutdown()
         bridge.shutdown()

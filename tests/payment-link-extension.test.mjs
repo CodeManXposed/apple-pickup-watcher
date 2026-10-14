@@ -16,11 +16,15 @@ function background({ taskActive = true } = {}) {
   const requests = [];
   let onMessage;
   let onCreated;
+  let onNavigationTarget;
   const chrome = {
     runtime: { onMessage: { addListener(listener) { onMessage = listener; } } },
     tabs: {
       onCreated: { addListener(listener) { onCreated = listener; } },
       onRemoved: { addListener() {} },
+    },
+    webNavigation: {
+      onCreatedNavigationTarget: { addListener(listener) { onNavigationTarget = listener; } },
     },
     storage: {
       session: {
@@ -47,7 +51,11 @@ function background({ taskActive = true } = {}) {
       if (!accepted) resolve(null);
     });
   }
-  return { send, requests, local, createTab(tab) { onCreated(tab); } };
+  return {
+    send, requests, local,
+    createTab(tab) { onCreated(tab); },
+    navigationTarget(details) { onNavigationTarget(details); },
+  };
 }
 
 test('only an active Apple guest checkout forwards a payment link', async () => {
@@ -151,6 +159,22 @@ test('new Alipay tab follows the parent order submission even when opened first'
   await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
   app.createTab({ id: 2, openerTabId: 1 });
   await new Promise(setImmediate);
+  await app.send({ type: 'apw-checkout-step', phase: 'order-submitted' }, 'https://secure11.www.apple.com.cn/shop/checkout');
+  assert.equal((await app.send({ type: 'apw-get-checkout' }, alipay, 2))?.phase, 'order-submitted');
+  assert.equal((await app.send({ type: 'apw-payment-link', kind: 'cashier', url: alipay }, alipay, 2))?.ok, true);
+});
+
+test('Alipay navigation without an opener follows only its active Apple checkout source', async () => {
+  const app = background();
+  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A', taskId }, apple);
+  await app.send({ type: 'apw-checkout-step', phase: 'bag-clicked' }, apple);
+  await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
+  app.navigationTarget({ tabId: 2, sourceTabId: 1, url: alipay });
+  app.navigationTarget({ tabId: 3, sourceTabId: 99, url: alipay });
+  app.navigationTarget({ tabId: 4, sourceTabId: 1, url: 'https://evil.example/pay' });
+  await new Promise(setImmediate);
+  assert.equal(await app.send({ type: 'apw-get-checkout' }, alipay, 3), null);
+  assert.equal(await app.send({ type: 'apw-get-checkout' }, alipay, 4), null);
   await app.send({ type: 'apw-checkout-step', phase: 'order-submitted' }, 'https://secure11.www.apple.com.cn/shop/checkout');
   assert.equal((await app.send({ type: 'apw-get-checkout' }, alipay, 2))?.phase, 'order-submitted');
   assert.equal((await app.send({ type: 'apw-payment-link', kind: 'cashier', url: alipay }, alipay, 2))?.ok, true);

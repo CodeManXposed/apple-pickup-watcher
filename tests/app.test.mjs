@@ -100,6 +100,9 @@ function renderApp() {
     taskSwitch: () => control((element) => element?.props?.id === "autoadd"),
     taskRows: () => all((element) => element?.type === "TableRow").length,
     profileSetupButton: () => control((element) => element?.type === "Button" && element.props.children === "准备独立浏览器"),
+    paymentLinks: () => all((element) => element?.type === "a" &&
+      typeof element.props.href === "string" && element.props.href.includes("alipay.com"))
+      .map((element) => element.props),
     state, saved, addedTargets, pushSaves,
   };
 }
@@ -130,6 +133,18 @@ test("monitor, Profile, and task pages keep their controls separate", () => {
   app.tab("monitor").onClick();
   assert.deepEqual(app.panelIds(), ["workspace-panel-monitor"]);
   assert.deepEqual(app.pushValues(), ["https://api.day.app/saved-key"]);
+});
+
+test("the task page displays the latest cashier or QR payment link", () => {
+  const app = renderApp();
+  const cashier = "https://excashier.alipay.com/payment.htm?order=test";
+  const qr = "https://qr.alipay.com/test-code";
+  app.state.paymentLink = { url: cashier, kind: "cashier", receivedAt: 1 };
+  assert.deepEqual(app.paymentLinks(), [], "the monitor page should not display checkout links");
+  app.tab("tasks").onClick();
+  assert.equal(app.paymentLinks()[0].href, cashier);
+  app.state.paymentLink = { url: qr, kind: "qr", receivedAt: 2 };
+  assert.equal(app.paymentLinks()[0].href, qr, "a refreshed QR link should replace the cashier link");
 });
 
 test("saved push addresses are one list with channel labels", () => {
