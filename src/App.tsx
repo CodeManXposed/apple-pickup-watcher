@@ -511,7 +511,7 @@ export default function App() {
           </div>
         </header>
 
-        <nav aria-label="工作区" className="bg-muted/70 flex w-fit max-w-full gap-1 rounded-xl border p-1" role="tablist">
+        <nav aria-label="工作区" className="bg-card grid w-full grid-cols-3 gap-1 rounded-xl border p-1 shadow-xs" role="tablist">
           {([
             ["monitor", "监控", Radar],
             ["profile", "Profile", UserRound],
@@ -526,10 +526,10 @@ export default function App() {
               aria-selected={activeTab === tab}
               onClick={() => selectTab(tab)}
               className={cn(
-                "flex min-w-30 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2",
+                "flex min-w-0 items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2",
                 activeTab === tab
-                  ? "bg-card text-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground hover:bg-card/60",
+                  ? "bg-primary text-primary-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground hover:bg-muted/70",
               )}
             >
               <Icon className="size-4" aria-hidden="true" />
@@ -594,6 +594,10 @@ export default function App() {
           aria-labelledby="workspace-tab-monitor"
           className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto"
         >
+        <div className="shrink-0">
+          <h2 className="text-lg font-semibold">库存监控</h2>
+          <p className="text-muted-foreground text-xs">添加商品与门店，配置提醒，并查看每个目标的最新库存。</p>
+        </div>
         <Panel
           title="添加监控目标"
           hint="不同品类、不同门店可以混着加；门店和 iPhone 的机型、容量、颜色都可多选，组合一次全部加入"
@@ -1026,9 +1030,13 @@ export default function App() {
             aria-labelledby="workspace-tab-profile"
             className="min-h-0 flex-1 overflow-y-auto"
           >
+            <div className="mb-3">
+              <h2 className="text-lg font-semibold">Profile</h2>
+              <p className="text-muted-foreground text-xs">管理独立浏览器里的取货人、配送资料与下单上限。</p>
+            </div>
             <div className="grid gap-4 pb-5 md:grid-cols-2">
               <section className="bg-card rounded-xl border p-5 shadow-xs md:col-span-2">
-                <h2 className="text-lg font-semibold">结账 Profile</h2>
+                <h3 className="font-semibold">结账资料设置</h3>
                 <p className="text-muted-foreground mt-1 text-sm">
                   取货人和配送资料保存在独立 Chrome 的扩展中。在扩展的「结账资料设置」里编辑，资料不会写入桌面应用的监控配置。
                 </p>
@@ -1074,6 +1082,10 @@ export default function App() {
             aria-labelledby="workspace-tab-tasks"
             className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto"
           >
+            <div className="shrink-0">
+              <h2 className="text-lg font-semibold">任务</h2>
+              <p className="text-muted-foreground text-xs">控制自动加车，跟踪结账进度并获取支付宝付款链接。</p>
+            </div>
             <section className="bg-card rounded-xl border p-4 shadow-xs">
               <div className="flex flex-wrap items-center gap-3">
                 <Switch
