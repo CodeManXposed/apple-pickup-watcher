@@ -8,6 +8,7 @@ const script = readFileSync(resolve('browser-extension/background.js'), 'utf8');
 const captureScript = readFileSync(resolve('browser-extension/alipay-capture.js'), 'utf8');
 const apple = 'https://www.apple.com.cn/shop/bag';
 const alipay = 'https://excashier.alipay.com/payment.htm?order=123';
+const taskId = 'b'.repeat(32);
 
 function background() {
   const session = new Map();
@@ -54,7 +55,7 @@ test('only an active Apple guest checkout forwards a payment link', async () => 
   assert.equal((await app.send(request, alipay))?.reason, 'no-active-checkout');
   assert.equal(app.requests.length, 0);
 
-  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A' }, apple);
+  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A', taskId }, apple);
   await app.send({ type: 'apw-checkout-step', phase: 'bag-clicked' }, apple);
   await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
   assert.equal((await app.send(request, alipay, 2))?.reason, 'no-active-checkout');
@@ -65,12 +66,13 @@ test('only an active Apple guest checkout forwards a payment link', async () => 
   assert.equal(paymentRequests.length, 1);
   assert.equal(JSON.parse(paymentRequests[0].options.body).url, alipay);
   assert.equal(JSON.parse(paymentRequests[0].options.body).partNumber, 'MJYE4CH/A');
+  assert.equal(JSON.parse(paymentRequests[0].options.body).taskId, taskId);
   assert.equal(paymentRequests[0].options.headers.Authorization, `Bearer ${'a'.repeat(32)}`);
 });
 
 test('rejects unrelated or forged cashier URLs and missing pairing code', async () => {
   const app = background();
-  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A' }, apple);
+  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A', taskId }, apple);
   await app.send({ type: 'apw-checkout-step', phase: 'bag-clicked' }, apple);
   await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
   await app.send({ type: 'apw-checkout-step', phase: 'order-submitted' }, 'https://secure11.www.apple.com.cn/shop/checkout');
@@ -85,7 +87,7 @@ test('forwards only stages from the active Apple checkout with its target', asyn
   const app = background();
   const stage = (name) => ({ type: 'apw-task-stage', stage: name });
   assert.equal((await app.send(stage('bag'), apple))?.reason, 'no-active-checkout');
-  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A' }, apple);
+  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A', taskId }, apple);
   assert.equal((await app.send(stage('bag'), apple))?.ok, true);
   assert.equal((await app.send(stage('review'), apple))?.reason, 'invalid-stage');
   assert.equal(await app.send(stage('bag'), 'https://evil.example/shop/bag'), null);
@@ -97,11 +99,12 @@ test('forwards only stages from the active Apple checkout with its target', asyn
     .map(({ options }) => JSON.parse(options.body));
   assert.deepEqual(statuses.map(({ stage }) => stage), ['bag', 'checkout', 'profile']);
   assert.ok(statuses.every(({ partNumber, storeNumber }) => partNumber === 'MJYE4CH/A' && storeNumber === 'R683'));
+  assert.ok(statuses.every((status) => status.taskId === taskId));
 });
 
 test('new Alipay tab follows the parent order submission even when opened first', async () => {
   const app = background();
-  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A' }, apple);
+  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A', taskId }, apple);
   await app.send({ type: 'apw-checkout-step', phase: 'bag-clicked' }, apple);
   await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
   app.createTab({ id: 2, openerTabId: 1 });

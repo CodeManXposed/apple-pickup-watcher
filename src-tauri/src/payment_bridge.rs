@@ -40,6 +40,7 @@ struct IncomingLink {
     kind: String,
     part_number: Option<String>,
     store_number: Option<String>,
+    task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,6 +48,8 @@ struct IncomingLink {
 pub struct BotStatus {
     pub part_number: String,
     pub store_number: String,
+    #[serde(skip_serializing)]
+    pub task_id: String,
     pub stage: String,
     pub updated_at: u64,
 }
@@ -56,6 +59,7 @@ pub struct BotStatus {
 struct IncomingStatus {
     part_number: String,
     store_number: String,
+    task_id: String,
     stage: String,
 }
 
@@ -98,6 +102,7 @@ impl PaymentBridge {
         let status = BotStatus {
             part_number: part_number.to_owned(),
             store_number: store_number.to_owned(),
+            task_id: uuid::Uuid::new_v4().simple().to_string(),
             stage: "starting".into(),
             updated_at: now(),
         };
@@ -110,12 +115,14 @@ impl PaymentBridge {
         stage: &str,
         part_number: &str,
         store_number: &str,
+        task_id: &str,
     ) -> Option<BotStatus> {
         let next_rank = stage_rank(stage)?;
         let mut current = self.status.write().unwrap_or_else(|e| e.into_inner());
         let previous = current.as_ref()?;
         if previous.part_number != part_number
             || previous.store_number != store_number
+            || previous.task_id != task_id
             || stage_rank(&previous.stage).is_none_or(|rank| rank >= next_rank)
         {
             return None;
@@ -123,6 +130,7 @@ impl PaymentBridge {
         let next = BotStatus {
             part_number: part_number.to_owned(),
             store_number: store_number.to_owned(),
+            task_id: task_id.to_owned(),
             stage: stage.to_owned(),
             updated_at: now(),
         };
@@ -402,6 +410,7 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
             &incoming.stage,
             &incoming.part_number,
             &incoming.store_number,
+            &incoming.task_id,
         ) else {
             respond(&mut socket, 409, origin, "{}").await;
             return;
@@ -432,7 +441,12 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
     };
     let fresh = bridge.record(link.clone());
     let advanced = bridge.status().and_then(|status| {
-        bridge.advance_task("paymentLink", &status.part_number, &status.store_number)
+        bridge.advance_task(
+            "paymentLink",
+            &status.part_number,
+            &status.store_number,
+            &status.task_id,
+        )
     });
     respond(&mut socket, 200, origin, "{\"ok\":true}").await;
     if let Some(status) = advanced {
@@ -448,7 +462,8 @@ fn valid_task_status(status: &IncomingStatus) -> bool {
     matches!(
         status.stage.as_str(),
         "bag" | "checkout" | "guest" | "profile" | "payment" | "review" | "orderSubmitted"
-    ) && (2..=10).contains(&status.store_number.len())
+    ) && valid_task_id(&status.task_id)
+        && (2..=10).contains(&status.store_number.len())
         && status
             .store_number
             .bytes()
@@ -466,10 +481,15 @@ fn valid_task_status(status: &IncomingStatus) -> bool {
             })
 }
 
+fn valid_task_id(value: &str) -> bool {
+    value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn link_matches_task(link: &IncomingLink, status: Option<&BotStatus>) -> bool {
     status.is_none_or(|status| {
         link.part_number.as_deref() == Some(status.part_number.as_str())
             && link.store_number.as_deref() == Some(status.store_number.as_str())
+            && link.task_id.as_deref() == Some(status.task_id.as_str())
             && matches!(status.stage.as_str(), "orderSubmitted" | "paymentLink")
     })
 }
@@ -533,28 +553,38 @@ mod tests {
     #[test]
     fn task_status_follows_one_target_and_never_moves_backward() {
         let bridge = PaymentBridge::disabled();
-        bridge.start_task("MJYE4CH/A", "R683");
-        assert!(bridge.advance_task("bag", "MJYE4CH/A", "R683").is_some());
-        assert!(bridge.advance_task("guest", "MJYE4CH/A", "R683").is_some());
+        let task_id = bridge.start_task("MJYE4CH/A", "R683").task_id;
         assert!(
             bridge
-                .advance_task("checkout", "MJYE4CH/A", "R683")
+                .advance_task("bag", "MJYE4CH/A", "R683", &task_id)
+                .is_some()
+        );
+        assert!(
+            bridge
+                .advance_task("guest", "MJYE4CH/A", "R683", &task_id)
+                .is_some()
+        );
+        assert!(
+            bridge
+                .advance_task("checkout", "MJYE4CH/A", "R683", &task_id)
                 .is_none()
         );
         assert!(
             bridge
-                .advance_task("payment", "MJYE4CH/A", "R999")
+                .advance_task("payment", "MJYE4CH/A", "R999", &task_id)
                 .is_none()
         );
         assert_eq!(bridge.status().unwrap().stage, "guest");
         assert!(valid_task_status(&IncomingStatus {
             part_number: "MJYE4CH/A".into(),
             store_number: "R683".into(),
+            task_id: task_id.clone(),
             stage: "profile".into(),
         }));
         assert!(!valid_task_status(&IncomingStatus {
             part_number: "../bag".into(),
             store_number: "R683".into(),
+            task_id,
             stage: "profile".into(),
         }));
     }
@@ -562,17 +592,24 @@ mod tests {
     #[test]
     fn payment_link_cannot_complete_another_active_task() {
         let bridge = PaymentBridge::disabled();
-        bridge.start_task("MJYE4CH/A", "R683");
+        let first_id = bridge.start_task("MJYE4CH/A", "R683").task_id;
         let link = IncomingLink {
             url: "https://qr.alipay.com/abc123".into(),
             kind: "qr".into(),
             part_number: Some("MJYE4CH/A".into()),
             store_number: Some("R683".into()),
+            task_id: Some(first_id.clone()),
         };
         assert!(!link_matches_task(&link, bridge.status().as_ref()));
-        bridge.advance_task("orderSubmitted", "MJYE4CH/A", "R683");
+        bridge.advance_task("orderSubmitted", "MJYE4CH/A", "R683", &first_id);
         assert!(link_matches_task(&link, bridge.status().as_ref()));
-        bridge.start_task("MJYE4CH/A", "R999");
+        let second_id = bridge.start_task("MJYE4CH/A", "R683").task_id;
+        assert_ne!(first_id, second_id);
+        assert!(
+            bridge
+                .advance_task("review", "MJYE4CH/A", "R683", &first_id)
+                .is_none()
+        );
         assert!(!link_matches_task(&link, bridge.status().as_ref()));
     }
 

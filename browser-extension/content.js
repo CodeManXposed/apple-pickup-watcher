@@ -5,14 +5,16 @@
   const KEY = 'apwAutoAddIntent';
   const PART = /^[A-Z0-9]{4,20}\/[A-Z]$/;
   const STORE = /^[A-Z0-9]{2,10}$/;
+  const TASK = /^[a-f0-9]{32}$/;
   const params = new URLSearchParams(location.hash.slice(1));
   let intent;
 
   if (params.has('apw-auto-add')) {
     const part = (params.get('apw-auto-add') || '').toUpperCase();
     const storeNumber = (params.get('apw-store') || '').toUpperCase();
-    if (!PART.test(part) || !STORE.test(storeNumber)) return;
-    intent = { part, storeNumber, phase: 'choosing', startedAt: Date.now() };
+    const taskId = params.get('apw-task');
+    if (!PART.test(part) || !STORE.test(storeNumber) || (taskId && !TASK.test(taskId))) return;
+    intent = { part, storeNumber, taskId, phase: 'choosing', startedAt: Date.now() };
     sessionStorage.setItem(KEY, JSON.stringify(intent));
     // 返回商品页或刷新时不能再次启动一次加车。
     history.replaceState(history.state, '', location.pathname + location.search);
@@ -55,7 +57,8 @@
     notice('已加入购物袋，正在核对商品并进入结账…');
     const prefix = location.pathname.split('/shop/')[0];
     const bag = `${location.origin}${prefix}/shop/bag`;
-    location.assign(`${bag}#apw-checkout=1&apw-store=${intent.storeNumber}&apw-part=${encodeURIComponent(intent.part)}`);
+    const task = intent.taskId ? `&apw-task=${intent.taskId}` : '';
+    location.assign(`${bag}#apw-checkout=1&apw-store=${intent.storeNumber}&apw-part=${encodeURIComponent(intent.part)}${task}`);
   }
 
   function visible(element) {

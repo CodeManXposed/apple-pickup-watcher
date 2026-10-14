@@ -489,12 +489,17 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
                     |url| {
                         let bridge = app.state::<PaymentBridge>();
                         let status = bridge.start_task(&target.part_number, &target.store_number);
+                        let task_id = status.task_id.clone();
                         let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
-                        let result = browser_bot::open_task(&app, url);
+                        let result =
+                            browser_bot::open_task(&app, &format!("{url}&apw-task={task_id}"));
                         let stage = if result.is_ok() { "launched" } else { "failed" };
-                        if let Some(status) =
-                            bridge.advance_task(stage, &target.part_number, &target.store_number)
-                        {
+                        if let Some(status) = bridge.advance_task(
+                            stage,
+                            &target.part_number,
+                            &target.store_number,
+                            &task_id,
+                        ) {
                             let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
                         }
                         result

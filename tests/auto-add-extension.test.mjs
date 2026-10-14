@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import test from 'node:test';
 
 const script = readFileSync(resolve('browser-extension/content.js'), 'utf8');
+const taskId = 'b'.repeat(32);
 
 function control({ disabled = false, shown = true, checked = false } = {}) {
   return {
@@ -15,7 +16,7 @@ function control({ disabled = false, shown = true, checked = false } = {}) {
   };
 }
 
-function page({ hash = '#apw-auto-add=MJYE4CH%2FA&apw-store=R683', formPart = 'MJYE4CH/A',
+function page({ hash = `#apw-auto-add=MJYE4CH%2FA&apw-store=R683&apw-task=${taskId}`, formPart = 'MJYE4CH/A',
   add = control({ disabled: true }), trade = control({ shown: false }),
   care = control({ disabled: true }), capacity = control() } = {}) {
   const nodes = new Map();
@@ -78,7 +79,7 @@ test('matching iPhone SKU chooses required options, clicks official add once, th
   p.location.search = '?product=mjye4ch/a&step=attach';
   p.tick();
   assert.equal(p.location.assigned,
-    'https://www.apple.com.cn/shop/bag#apw-checkout=1&apw-store=R683&apw-part=MJYE4CH%2FA');
+    `https://www.apple.com.cn/shop/bag#apw-checkout=1&apw-store=R683&apw-part=MJYE4CH%2FA&apw-task=${taskId}`);
   assert.equal(p.storage.size, 0);
 });
 

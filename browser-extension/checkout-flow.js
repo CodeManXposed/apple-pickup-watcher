@@ -8,6 +8,7 @@
   const markedBag = isBag && params.get('apw-checkout') === '1';
   const storeNumber = params.get('apw-store');
   const partNumber = (params.get('apw-part') || '').toUpperCase();
+  const taskId = params.get('apw-task');
   const GUEST_TEXT = /^(?:(?:以访客身份|以游客身份)(?:继续|结[账帐]|购买)|(?:继续)?以访客身份结[账帐]|访客结[账帐]|访客继续|continue as (?:a )?guest|guest checkout)$/i;
   let done = false;
   let scheduled = false;
@@ -208,7 +209,7 @@
       }
     }
     if (markedBag && !begun) {
-      const started = await chrome.runtime.sendMessage({ type: 'apw-begin-checkout', storeNumber, partNumber });
+      const started = await chrome.runtime.sendMessage({ type: 'apw-begin-checkout', storeNumber, partNumber, taskId });
       if (!started) { done = true; return; }
       begun = true;
       reportStage('bag');

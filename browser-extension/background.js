@@ -70,7 +70,7 @@ async function forwardPaymentLink(message, sender, flow) {
       },
       body: JSON.stringify({
         url: message.url, kind: message.kind,
-        partNumber: flow.partNumber, storeNumber: flow.storeNumber,
+        partNumber: flow.partNumber, storeNumber: flow.storeNumber, taskId: flow.taskId,
       }),
       signal: AbortSignal.timeout(5000),
     });
@@ -92,6 +92,7 @@ async function forwardStage(stage, sender, flow) {
     'order-submitted': ['orderSubmitted'],
   };
   if (!allowed[flow.phase]?.includes(stage)) return { ok: false, reason: 'invalid-stage' };
+  if (!/^[a-f0-9]{32}$/.test(flow.taskId || '')) return { ok: false, reason: 'missing-task-id' };
   const { apwBridgeToken } = await chrome.storage.local.get('apwBridgeToken');
   if (!/^[a-f0-9]{32}$/i.test(apwBridgeToken || '')) {
     return { ok: false, reason: 'missing-pairing-code' };
@@ -103,7 +104,7 @@ async function forwardStage(stage, sender, flow) {
         'Authorization': `Bearer ${apwBridgeToken}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ partNumber: flow.partNumber, storeNumber: flow.storeNumber, stage }),
+      body: JSON.stringify({ partNumber: flow.partNumber, storeNumber: flow.storeNumber, taskId: flow.taskId, stage }),
       signal: AbortSignal.timeout(1000),
     });
     return response.ok ? { ok: true } : { ok: false, reason: `bridge-http-${response.status}` };
@@ -121,7 +122,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       if (!/\/shop\/bag\/?$/.test(new URL(sender.url).pathname)) return null;
       if (!/^[A-Z0-9]{2,10}$/.test(message.storeNumber || '')) return null;
       if (!/^[A-Z0-9]{4,20}\/[A-Z]$/.test(message.partNumber || '')) return null;
-      const flow = { startedAt: Date.now(), phase: 'bag', storeNumber: message.storeNumber, partNumber: message.partNumber };
+      if (message.taskId && !/^[a-f0-9]{32}$/.test(message.taskId)) return null;
+      const flow = { startedAt: Date.now(), phase: 'bag', storeNumber: message.storeNumber, partNumber: message.partNumber, taskId: message.taskId || null };
       await chrome.storage.session.set({ [key]: flow });
       return flow;
     }

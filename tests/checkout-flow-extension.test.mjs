@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import test from 'node:test';
 
 const script = readFileSync(resolve('browser-extension/checkout-flow.js'), 'utf8');
+const taskId = 'b'.repeat(32);
 
 function button(label, group = null) {
   return {
@@ -23,9 +24,11 @@ async function page({ pathname, hash = '', official = [], candidates = [], phase
   const attributes = new Map();
   let currentPhase = phase;
   let clickHandler;
+  const sent = [];
   const chrome = {
     runtime: {
       async sendMessage(message) {
+        sent.push(message);
         if (message.type === 'apw-begin-checkout') currentPhase = 'bag';
         if (message.type === 'apw-checkout-step') currentPhase = message.phase;
         return currentPhase ? { phase: currentPhase, storeNumber: 'R683' } : null;
@@ -61,7 +64,7 @@ async function page({ pathname, hash = '', official = [], candidates = [], phase
     setTimeout() { return 1; },
   });
   await new Promise(setImmediate);
-  return { history, notices, click(target) { clickHandler?.({ target }); }, get phase() { return currentPhase; } };
+  return { history, notices, sent, click(target) { clickHandler?.({ target }); }, get phase() { return currentPhase; } };
 }
 
 test('marked bag clicks the official checkout button once', async () => {
@@ -70,13 +73,14 @@ test('marked bag clicks the official checkout button once', async () => {
   const item = { href: 'https://www.apple.com.cn/shop/product/mjye4ch/a',
     closest() { return { querySelector() { return { value: '1' }; } }; } };
   const result = await page({
-    pathname: '/shop/bag', hash: '#apw-checkout=1&apw-store=R683&apw-part=MJYE4CH%2FA',
+    pathname: '/shop/bag', hash: `#apw-checkout=1&apw-store=R683&apw-part=MJYE4CH%2FA&apw-task=${taskId}`,
     official: [checkout], candidates: [applePay],
     selectors: { '[data-autom="bag-item-name"]': [item] },
   });
   assert.equal(checkout.clicks, 1);
   assert.equal(applePay.clicks, 0);
   assert.equal(result.phase, 'bag-clicked');
+  assert.equal(result.sent.find((message) => message.type === 'apw-begin-checkout')?.taskId, taskId);
   assert.equal(result.history.url, '/shop/bag');
 });
 
