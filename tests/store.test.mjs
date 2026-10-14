@@ -117,6 +117,16 @@ test("a failed locale save keeps the original locale and catalog without loading
   assert.match(app.snapshot().logs.at(-1), /保存设置失败.*disk full/);
 });
 
+test("a rejected settings save returns the reason for inline task feedback", async () => {
+  const app = setup();
+  const before = app.snapshot().settings;
+  app.handlers.save_settings = () => { throw new Error("扩展连接码不匹配"); };
+  const error = await app.saveSettings({ ...before, autoAddToBag: true });
+  assert.match(error, /扩展连接码不匹配/);
+  assert.equal(app.snapshot().settings, before);
+  assert.match(app.snapshot().logs.at(-1), /扩展连接码不匹配/);
+});
+
 test("a delayed settings save that restores the old locale also restores its matching catalog", async () => {
   const app = setup();
   await app.loadCatalog("zh_CN");

@@ -296,6 +296,8 @@ export default function App() {
   const [browserPreparing, setBrowserPreparing] = useState(false);
   const [watchStarting, setWatchStarting] = useState(false);
   const [watchStartError, setWatchStartError] = useState("");
+  const [taskSaving, setTaskSaving] = useState(false);
+  const [taskFeedback, setTaskFeedback] = useState("");
 
   async function onStartWatching() {
     setWatchStarting(true);
@@ -306,6 +308,16 @@ export default function App() {
       setWatchStartError(String(error));
     } finally {
       setWatchStarting(false);
+    }
+  }
+
+  async function onAutoAddChange(enabled: boolean) {
+    setTaskSaving(true);
+    setTaskFeedback("");
+    try {
+      setTaskFeedback((await saveSettings({ ...ui.settings, autoAddToBag: enabled })) ?? "");
+    } finally {
+      setTaskSaving(false);
     }
   }
 
@@ -546,7 +558,7 @@ export default function App() {
                 <Pause /> 暂停
               </Button>
             ) : (
-              <Button aria-label={watchStarting ? "正在检查自动监控环境" : "开始监控"} onClick={() => void onStartWatching()} disabled={ui.rows.length === 0 || watchStarting}>
+              <Button aria-label={watchStarting ? "正在检查自动监控环境" : "开始监控"} onClick={() => void onStartWatching()} disabled={ui.rows.length === 0 || watchStarting || taskSaving}>
                 <Play /> {watchStarting ? "正在检查…" : "开始"}
               </Button>
             )}
@@ -1153,13 +1165,15 @@ export default function App() {
                 <Switch
                   id="autoadd"
                   checked={ui.settings.autoAddToBag}
-                  onCheckedChange={(value) => void saveSettings({ ...ui.settings, autoAddToBag: value })}
+                  disabled={taskSaving}
+                  onCheckedChange={(value) => void onAutoAddChange(value)}
                 />
                 <Label htmlFor="autoadd" className="font-medium">有货时启动自动加车任务</Label>
                 <Button variant="outline" size="sm" className="ml-auto" onClick={() => selectTab("profile")}>设置 Profile</Button>
               </div>
+              {taskFeedback && <p role="alert" className="text-destructive mt-2 text-sm">{taskFeedback}</p>}
               <p className="text-muted-foreground mt-2 text-sm">
-                开始监控前会检查独立浏览器、扩展连接码和取货资料。每次监控最多为首个有货目标启动一项浏览器任务；其他目标继续监控并提醒。结账资料和自动下单上限在 Profile 页介绍的扩展设置中配置。
+                启用自动加车和开始监控时会检查独立浏览器、扩展连接码和取货资料。每次监控最多为首个有货目标启动一项浏览器任务；其他目标继续监控并提醒。结账资料和自动下单上限在 Profile 页介绍的扩展设置中配置。
               </p>
             </section>
 

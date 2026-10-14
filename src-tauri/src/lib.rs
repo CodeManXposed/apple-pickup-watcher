@@ -248,6 +248,7 @@ async fn open_bot_browser(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn save_settings(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
     settings: Settings,
 ) -> Result<Settings, String> {
@@ -255,6 +256,12 @@ async fn save_settings(
     next.normalize();
     state.catalog.attach_companions(&mut next.targets);
     state.catalog.attach_locations(&mut next.targets);
+
+    // 无论监控是否已运行，开启自动加车前都做预检。
+    // 预检放在任何引擎或配置改动之前，失败时保持旧设置。
+    if next.auto_add_to_bag && !state.settings_snapshot().auto_add_to_bag {
+        preflight_checkout(app).await?;
+    }
 
     // 设置里的目标列表和查询间隔要同步给引擎，否则改完设置监控还按旧的跑。
     state.watcher.set_targets(next.targets.clone()).await;
@@ -322,13 +329,17 @@ async fn set_interval(state: tauri::State<'_, AppState>, seconds: u64) -> Result
 #[tauri::command]
 async fn start_watching(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
     if state.settings_snapshot().auto_add_to_bag {
-        let pairing_code = app.state::<PaymentBridge>().pairing_code()?.to_owned();
-        tauri::async_runtime::spawn_blocking(move || browser_bot::preflight(&app, &pairing_code))
-            .await
-            .map_err(|e| format!("检查自动结账环境中断：{e}"))??;
+        preflight_checkout(app).await?;
     }
     state.watcher.start().await;
     Ok(())
+}
+
+async fn preflight_checkout(app: AppHandle) -> Result<(), String> {
+    let pairing_code = app.state::<PaymentBridge>().pairing_code()?.to_owned();
+    tauri::async_runtime::spawn_blocking(move || browser_bot::preflight(&app, &pairing_code))
+        .await
+        .map_err(|e| format!("检查自动结账环境中断：{e}"))?
 }
 
 #[tauri::command]
@@ -534,6 +545,11 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
                 let _ = app.emit(NOTICE_CHANNEL, "零件号无效，已跳过该目标的自动加车");
             }
 
+            // 浏览器启动可能耗时数秒；先交给独立通知任务，避免耽误到货提醒。
+            if notifications.send(notification).await.is_err() {
+                let _ = app.emit(NOTICE_CHANNEL, "提醒发送任务已停止，无法发送到货提醒");
+            }
+
             use tauri_plugin_opener::OpenerExt;
             let open_result = if settings.auto_add_to_bag {
                 let checkout_area = app
@@ -556,15 +572,15 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
                         let status = bridge.start_task(&target.part_number, &target.store_number);
                         let task_id = status.task_id.clone();
                         let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
-                        let task_url = browser_task_url(
+                        let result = browser_task_url(
                             url,
                             &task_id,
                             &target.product_name,
                             checkout_area.as_ref().map(|(province, city, district)| {
                                 (province.as_str(), city.as_str(), district.as_str())
                             }),
-                        )?;
-                        let result = browser_bot::open_task(&app, task_url.as_str());
+                        )
+                        .and_then(|task_url| browser_bot::open_task(&app, task_url.as_str()));
                         let stage = if result.is_ok() { "launched" } else { "failed" };
                         if let Some(status) = bridge.advance_task(
                             stage,
@@ -605,12 +621,6 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
             };
             if let Err(err) = open_result {
                 let _ = app.emit(NOTICE_CHANNEL, format!("打开购买页面失败：{err}"));
-            }
-
-            // 不逐项等待网络推送，否则15个Bark超时会让快照和暂停状态迟到150秒。
-            // 队列满时保留背压，不丢提醒，也不无限创建后台任务。
-            if notifications.send(notification).await.is_err() {
-                let _ = app.emit(NOTICE_CHANNEL, "提醒发送任务已停止，无法发送到货提醒");
             }
         }
     }

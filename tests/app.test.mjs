@@ -6,12 +6,14 @@ function renderApp() {
   const saved = [];
   let browserOpens = 0;
   let startFailure = null;
+  let saveFailure = null;
+  let savePending = null;
   const addedTargets = [];
   const pushSaves = [];
   const state = {
     settings: { locale: "zh_CN", barkUrl: "https://api.day.app/saved-key", intervalSeconds: 30, autoAddToBag: false },
     stores: [], products: [], rows: [], regions: [], categories: [], logs: [],
-    category: "iphone", trouble: null, update: null,
+    category: "iphone", trouble: null, update: null, pacing: null,
   };
   const hooks = [];
   let cursor = 0;
@@ -31,7 +33,12 @@ function renderApp() {
       watcherStore: { getSnapshot: () => state },
       openBotBrowser: async () => { browserOpens++; },
       startWatching: async () => { if (startFailure) throw startFailure; },
-      saveSettings: async (settings) => { saved.push(settings); state.settings = settings; },
+      saveSettings: async (settings) => {
+        if (savePending) await savePending;
+        if (saveFailure) return `保存设置失败：${saveFailure}`;
+        saved.push(settings); state.settings = settings;
+        return null;
+      },
       setTargets: async (targets) => { addedTargets.push(targets); },
       setCategory: (category) => { state.category = category; },
       changeLocale: async (locale) => { state.settings = { ...state.settings, locale }; },
@@ -108,6 +115,8 @@ function renderApp() {
     startButton: () => control((element) => element?.props?.["aria-label"] === "开始监控"),
     alerts: () => all((element) => element?.props?.role === "alert").map((element) => JSON.stringify(element.props)),
     setStartFailure: (error) => { startFailure = error; },
+    setSaveFailure: (error) => { saveFailure = error; },
+    setSavePending: (pending) => { savePending = pending; },
     browserOpens: () => browserOpens,
     paymentLinks: () => all((element) => element?.type === "a" &&
       typeof element.props.href === "string" && element.props.href.includes("alipay.com"))
@@ -194,6 +203,33 @@ test("a failed browser preflight is visible without starting monitoring", async 
   await new Promise(setImmediate);
   assert.match(app.alerts().join(" "), /缺少取货资料/);
   assert.equal(app.state.running, undefined);
+});
+
+test("enabling auto add while running shows a preflight failure beside the task switch", async () => {
+  const app = renderApp();
+  app.state.running = true;
+  app.setSaveFailure("扩展连接码不匹配");
+  app.tab("tasks").onClick();
+  app.taskSwitch().onCheckedChange(true);
+  await new Promise(setImmediate);
+  assert.equal(app.taskSwitch().checked, false);
+  assert.match(app.alerts().join(" "), /扩展连接码不匹配/);
+});
+
+test("monitor start waits while auto add readiness is being saved", async () => {
+  const app = renderApp();
+  app.state.rows = [{
+    target: { partNumber: "TEST/A", storeNumber: "R001", productName: "测试商品", storeTitle: "测试门店" },
+    availability: { kind: "pending" },
+  }];
+  let finishSave;
+  app.setSavePending(new Promise((resolve) => { finishSave = resolve; }));
+  app.tab("tasks").onClick();
+  app.taskSwitch().onCheckedChange(true);
+  assert.equal(app.startButton().disabled, true);
+  finishSave();
+  await new Promise(setImmediate);
+  assert.equal(app.startButton().disabled, false);
 });
 
 test("saved push addresses are one list with channel labels", () => {

@@ -277,7 +277,7 @@ export async function loadCatalog(locale: string): Promise<void> {
   }
 }
 
-export async function saveSettings(next: Settings): Promise<void> {
+export async function saveSettings(next: Settings): Promise<string | null> {
   try {
     const saved = await invoke<Settings>("save_settings", { settings: next });
     if (saved.locale !== state.settings.locale) {
@@ -288,8 +288,11 @@ export async function saveSettings(next: Settings): Promise<void> {
     } else {
       update({ settings: saved });
     }
+    return null;
   } catch (err) {
-    pushLog(`保存设置失败：${String(err)}`);
+    const message = `保存设置失败：${String(err)}`;
+    pushLog(message);
+    return message;
   }
 }
 
