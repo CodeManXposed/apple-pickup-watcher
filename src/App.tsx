@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { type KeyboardEvent, type ReactNode, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
   AlertTriangle,
   BellRing,
@@ -194,6 +194,7 @@ function Panel({
 const SETTINGS_OPEN_KEY = "apw.settingsOpen";
 const WORKSPACE_TAB_KEY = "apw.workspaceTab";
 type WorkspaceTab = "monitor" | "profile" | "tasks";
+const WORKSPACE_TABS = ["monitor", "profile", "tasks"] as const;
 
 function readWorkspaceTab(): WorkspaceTab {
   try {
@@ -299,6 +300,21 @@ export default function App() {
     } catch {
       // 分页选择在当前窗口仍然有效。
     }
+  }
+
+  function onTabKeyDown(event: KeyboardEvent<HTMLButtonElement>, tab: WorkspaceTab) {
+    const index = WORKSPACE_TABS.indexOf(tab);
+    const next = event.key === "ArrowRight"
+      ? WORKSPACE_TABS[(index + 1) % WORKSPACE_TABS.length]
+      : event.key === "ArrowLeft"
+        ? WORKSPACE_TABS[(index + WORKSPACE_TABS.length - 1) % WORKSPACE_TABS.length]
+        : event.key === "Home" ? WORKSPACE_TABS[0]
+          : event.key === "End" ? WORKSPACE_TABS[WORKSPACE_TABS.length - 1]
+            : undefined;
+    if (!next) return;
+    event.preventDefault();
+    selectTab(next);
+    event.currentTarget.ownerDocument.getElementById(`workspace-tab-${next}`)?.focus();
   }
 
   useEffect(() => {
@@ -511,7 +527,7 @@ export default function App() {
           </div>
         </header>
 
-        <nav aria-label="工作区" className="bg-card grid w-full grid-cols-3 gap-1 rounded-xl border p-1 shadow-xs" role="tablist">
+        <nav aria-label="工作区" className="grid w-full grid-cols-3 border-b" role="tablist">
           {([
             ["monitor", "监控", Radar],
             ["profile", "Profile", UserRound],
@@ -524,18 +540,25 @@ export default function App() {
               role="tab"
               aria-controls={`workspace-panel-${tab}`}
               aria-selected={activeTab === tab}
+              tabIndex={activeTab === tab ? 0 : -1}
               onClick={() => selectTab(tab)}
+              onKeyDown={(event) => onTabKeyDown(event, tab)}
               className={cn(
-                "flex min-w-0 items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2",
+                "-mb-px flex min-w-0 items-center justify-center gap-2 border-b-2 px-3 py-3 text-sm font-medium transition-colors focus-visible:rounded-md focus-visible:outline-2 focus-visible:outline-offset-2",
                 activeTab === tab
-                  ? "bg-primary text-primary-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground hover:bg-muted/70",
+                  ? "border-primary text-foreground"
+                  : "text-muted-foreground hover:border-muted-foreground/40 hover:bg-muted/50 hover:text-foreground border-transparent",
               )}
             >
               <Icon className="size-4" aria-hidden="true" />
               {label}
               {tab === "monitor" && ui.rows.length > 0 && (
-                <span className="text-muted-foreground text-xs tabular-nums">{ui.rows.length}</span>
+                <span className="bg-muted text-muted-foreground rounded-full px-1.5 text-xs tabular-nums">{ui.rows.length}</span>
+              )}
+              {tab === "tasks" && (ui.paymentLink || ui.botStatus) && (
+                <span className="bg-muted text-muted-foreground rounded-full px-1.5 text-xs">
+                  {ui.paymentLink ? "付款链接" : "进度"}
+                </span>
               )}
             </button>
           ))}

@@ -135,6 +135,30 @@ test("monitor, Profile, and task pages keep their controls separate", () => {
   assert.deepEqual(app.pushValues(), ["https://api.day.app/saved-key"]);
 });
 
+test("workspace tabs support keyboard navigation and one tab stop", () => {
+  const app = renderApp();
+  const focused = [];
+  let prevented = 0;
+  const event = (key) => ({
+    key,
+    preventDefault() { prevented++; },
+    currentTarget: { ownerDocument: { getElementById(id) {
+      return { focus() { focused.push(id); } };
+    } } },
+  });
+  assert.equal(app.tab("monitor").tabIndex, 0);
+  assert.equal(app.tab("profile").tabIndex, -1);
+  app.tab("monitor").onKeyDown(event("ArrowRight"));
+  assert.deepEqual(app.panelIds(), ["workspace-panel-profile"]);
+  assert.equal(app.tab("profile").tabIndex, 0);
+  app.tab("profile").onKeyDown(event("End"));
+  assert.deepEqual(app.panelIds(), ["workspace-panel-tasks"]);
+  app.tab("tasks").onKeyDown(event("ArrowRight"));
+  assert.deepEqual(app.panelIds(), ["workspace-panel-monitor"]);
+  assert.equal(prevented, 3);
+  assert.deepEqual(focused, ["workspace-tab-profile", "workspace-tab-tasks", "workspace-tab-monitor"]);
+});
+
 test("the task page displays the latest cashier or QR payment link", () => {
   const app = renderApp();
   const cashier = "https://excashier.alipay.com/payment.htm?order=test";
