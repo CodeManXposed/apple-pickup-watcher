@@ -26,6 +26,16 @@
       "matches": [
         "https://www.apple.com/shop/*",
         "https://www.apple.com/*/shop/*",
+        "https://www.apple.com.cn/shop/*"
+      ],
+      "js": ["cart-failure.js"],
+      "run_at": "document_idle",
+      "world": "ISOLATED"
+    },
+    {
+      "matches": [
+        "https://www.apple.com/shop/*",
+        "https://www.apple.com/*/shop/*",
         "https://www.apple.com.cn/shop/*",
         "https://*.www.apple.com/shop/*",
         "https://*.www.apple.com/*/shop/*",

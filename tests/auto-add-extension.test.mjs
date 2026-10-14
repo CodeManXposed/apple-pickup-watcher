@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import test from 'node:test';
 
 const script = readFileSync(resolve('browser-extension/content.js'), 'utf8');
+const failureScript = readFileSync(resolve('browser-extension/cart-failure.js'), 'utf8');
 const taskId = 'b'.repeat(32);
 
 function control({ disabled = false, shown = true, checked = false } = {}) {
@@ -16,14 +17,15 @@ function control({ disabled = false, shown = true, checked = false } = {}) {
   };
 }
 
-function page({ hash = `#apw-auto-add=MJYE4CH%2FA&apw-store=R683&apw-task=${taskId}`, formPart = 'MJYE4CH/A',
+function page({ hash = `#apw-auto-add=MJYE4CH%2FA&apw-store=R683&apw-task=${taskId}`,
+  search = '', initialIntent = null, title = '', formPart = 'MJYE4CH/A',
   add = control({ disabled: true }), trade = control({ shown: false }),
   care = control({ disabled: true }), capacity = control() } = {}) {
   const nodes = new Map();
-  const storage = new Map();
+  const storage = new Map(initialIntent ? [['apwAutoAddIntent', JSON.stringify(initialIntent)]] : []);
   const location = {
     pathname: '/shop/buy-iphone/iphone-18-pro/mjye4ch/a',
-    search: '', hash, origin: 'https://www.apple.com.cn',
+    search, hash, origin: 'https://www.apple.com.cn',
     assign(url) { this.assigned = url; },
   };
   const history = { state: null, replaceState(_state, _title, url) { this.replaced = url; location.hash = ''; } };
@@ -31,6 +33,7 @@ function page({ hash = `#apw-auto-add=MJYE4CH%2FA&apw-store=R683&apw-task=${task
     return selector === '[data-autom="add-to-cart"]' ? add : null;
   } };
   const document = {
+    title,
     body: { appendChild(node) { nodes.set(node.id, node); } },
     createElement() { return { style: {}, setAttribute() {}, textContent: '' }; },
     getElementById(id) { return nodes.get(id) ?? null; },
@@ -99,4 +102,36 @@ test('mismatched attach product never starts checkout', () => {
   p.location.search = '?product=otherch/a&step=attach';
   p.tick();
   assert.equal(p.location.assigned, undefined);
+});
+
+test('Apple add error page stops the cart flow and reports the active task', async () => {
+  const intent = {
+    part: 'MJYE4CH/A', storeNumber: 'R683', taskId,
+    phase: 'submitting', startedAt: Date.now(), submittedAt: Date.now(),
+  };
+  const p = page({
+    hash: '', search: '?product=MJYE4CH%2FA&add-to-cart=add-to-cart',
+    initialIntent: intent, title: 'Page Not Found - Apple',
+  });
+  assert.equal(JSON.parse(p.storage.get('apwAutoAddIntent')).phase, 'failed');
+  assert.equal(p.add.clicks, 0);
+
+  const sent = [];
+  const window = {};
+  window.top = window;
+  vm.runInNewContext(failureScript, {
+    window, location: p.location, document: { title: 'Page Not Found - Apple' },
+    sessionStorage: {
+      getItem(key) { return p.storage.get(key) ?? null; },
+      removeItem(key) { p.storage.delete(key); },
+    },
+    chrome: { runtime: { async sendMessage(message) { sent.push(message); } } },
+    URLSearchParams, Date,
+  });
+  await new Promise(setImmediate);
+  assert.deepEqual(sent.map(({ type, partNumber, storeNumber, taskId: id }) =>
+    ({ type, partNumber, storeNumber, taskId: id })), [
+    { type: 'apw-cart-failed', partNumber: 'MJYE4CH/A', storeNumber: 'R683', taskId },
+  ]);
+  assert.equal(p.storage.size, 0);
 });

@@ -113,6 +113,39 @@ async function forwardStage(stage, sender, flow) {
   }
 }
 
+async function forwardCartFailure(message, sender) {
+  const page = new URL(sender.url);
+  if (!applePage(sender.url) || !page.pathname.includes('/shop/buy-') ||
+      page.searchParams.get('add-to-cart') !== 'add-to-cart' ||
+      page.searchParams.get('product')?.toUpperCase() !== message.partNumber ||
+      !/^[A-Z0-9]{4,20}\/[A-Z]$/.test(message.partNumber || '') ||
+      !/^[A-Z0-9]{2,10}$/.test(message.storeNumber || '') ||
+      !/^[a-f0-9]{32}$/.test(message.taskId || '')) {
+    return { ok: false, reason: 'invalid-cart-failure' };
+  }
+  const { apwBridgeToken } = await chrome.storage.local.get('apwBridgeToken');
+  if (!/^[a-f0-9]{32}$/i.test(apwBridgeToken || '')) {
+    return { ok: false, reason: 'missing-pairing-code' };
+  }
+  try {
+    const response = await fetch(STATUS_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apwBridgeToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        partNumber: message.partNumber, storeNumber: message.storeNumber,
+        taskId: message.taskId, stage: 'failed',
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+    return response.ok ? { ok: true } : { ok: false, reason: `bridge-http-${response.status}` };
+  } catch {
+    return { ok: false, reason: 'bridge-unreachable' };
+  }
+}
+
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if ((!applePage(sender.url) && !alipayPage(sender.url)) || !Number.isInteger(sender.tab?.id)) return false;
   const tabId = sender.tab.id;
@@ -126,6 +159,9 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       const flow = { startedAt: Date.now(), phase: 'bag', storeNumber: message.storeNumber, partNumber: message.partNumber, taskId: message.taskId || null };
       await chrome.storage.session.set({ [key]: flow });
       return flow;
+    }
+    if (message?.type === 'apw-cart-failed') {
+      return forwardCartFailure(message, sender);
     }
     const flow = await flowFor(tabId);
     if (message?.type === 'apw-get-checkout') return flow;

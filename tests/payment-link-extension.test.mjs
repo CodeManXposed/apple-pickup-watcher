@@ -104,6 +104,20 @@ test('forwards only stages from the active Apple checkout with its target', asyn
   assert.ok(statuses.every((status) => status.taskId === taskId));
 });
 
+test('cart error reporting requires the matching Apple add URL and task identity', async () => {
+  const app = background();
+  const url = 'https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro/mjye4ch/a?product=MJYE4CH%2FA&add-to-cart=add-to-cart';
+  const message = { type: 'apw-cart-failed', partNumber: 'MJYE4CH/A', storeNumber: 'R683', taskId };
+  assert.equal((await app.send(message, apple))?.reason, 'invalid-cart-failure');
+  assert.equal((await app.send({ ...message, partNumber: 'OTHERCH/A' }, url))?.reason, 'invalid-cart-failure');
+  assert.equal((await app.send(message, url))?.ok, true);
+  const statuses = app.requests.filter(({ url: endpoint }) => endpoint.endsWith('/task-status'));
+  assert.equal(statuses.length, 1);
+  assert.deepEqual(JSON.parse(statuses[0].options.body), {
+    partNumber: 'MJYE4CH/A', storeNumber: 'R683', taskId, stage: 'failed',
+  });
+});
+
 test('order confirmations stay bound to the monitored store and checkout tab', async () => {
   const app = background();
   const checkout = 'https://secure11.www.apple.com.cn/shop/checkout';

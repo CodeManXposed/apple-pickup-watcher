@@ -74,6 +74,15 @@
 
     // Apple 接受官方加车动作后会进入配件推荐页；product 参数可确认本次 SKU。
     const query = new URLSearchParams(location.search);
+    if (intent.phase === 'submitting' && query.get('add-to-cart') === 'add-to-cart' &&
+        /^Page Not Found(?:\s*-|$)/i.test(document.title)) {
+      // Apple 的加车请求可能直接返回错误页（实测 HTTP 541），不能继续等待配件页。
+      intent.phase = 'failed';
+      sessionStorage.setItem(KEY, JSON.stringify(intent));
+      clearInterval(timer);
+      notice('Apple 拒绝了加车请求。商品未加入购物袋，请稍后重试。', true);
+      return;
+    }
     if (intent.phase === 'submitting' && query.get('step') === 'attach' &&
         query.get('product')?.toUpperCase() === intent.part) {
       finish();

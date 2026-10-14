@@ -432,17 +432,33 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
             respond(&mut socket, 400, origin, "{}").await;
             return;
         }
-        let Some(status) = bridge.advance_task(
-            &incoming.stage,
-            &incoming.part_number,
-            &incoming.store_number,
-            &incoming.task_id,
-        ) else {
+        let advanced = if incoming.stage == "failed" {
+            bridge.status().and_then(|current| {
+                (current.part_number == incoming.part_number
+                    && current.store_number == incoming.store_number)
+                    .then(|| bridge.fail_if_stage(&incoming.task_id, "launched"))
+                    .flatten()
+            })
+        } else {
+            bridge.advance_task(
+                &incoming.stage,
+                &incoming.part_number,
+                &incoming.store_number,
+                &incoming.task_id,
+            )
+        };
+        let Some(status) = advanced else {
             respond(&mut socket, 409, origin, "{}").await;
             return;
         };
         respond(&mut socket, 200, origin, "{\"ok\":true}").await;
         let _ = app.emit(STATUS_CHANNEL, status);
+        if incoming.stage == "failed" {
+            let _ = app.emit(
+                NOTICE_CHANNEL,
+                "Apple 返回加车错误页面，商品未加入购物袋。请稍后重试或检查当前网络。",
+            );
+        }
         return;
     }
     let Ok(incoming) = serde_json::from_slice::<IncomingLink>(&body) else {
@@ -487,7 +503,14 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
 fn valid_task_status(status: &IncomingStatus) -> bool {
     matches!(
         status.stage.as_str(),
-        "bag" | "checkout" | "guest" | "profile" | "payment" | "review" | "orderSubmitted"
+        "bag"
+            | "checkout"
+            | "guest"
+            | "profile"
+            | "payment"
+            | "review"
+            | "orderSubmitted"
+            | "failed"
     ) && valid_task_id(&status.task_id)
         && (2..=10).contains(&status.store_number.len())
         && status
@@ -606,6 +629,12 @@ mod tests {
             store_number: "R683".into(),
             task_id: task_id.clone(),
             stage: "profile".into(),
+        }));
+        assert!(valid_task_status(&IncomingStatus {
+            part_number: "MJYE4CH/A".into(),
+            store_number: "R683".into(),
+            task_id: task_id.clone(),
+            stage: "failed".into(),
         }));
         assert!(!valid_task_status(&IncomingStatus {
             part_number: "../bag".into(),
