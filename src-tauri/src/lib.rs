@@ -483,6 +483,17 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
 
             use tauri_plugin_opener::OpenerExt;
             let open_result = if settings.auto_add_to_bag {
+                let checkout_area = app
+                    .state::<AppState>()
+                    .catalog
+                    .store_by_number(&target.locale, &target.store_number)
+                    .and_then(|store| {
+                        store
+                            .checkout_area(&target.locale)
+                            .map(|(province, city, district)| {
+                                (province.to_string(), city.to_string(), district.to_string())
+                            })
+                    });
                 auto_open_bag.open_if_needed(
                     true,
                     &target.locale,
@@ -492,8 +503,16 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
                         let status = bridge.start_task(&target.part_number, &target.store_number);
                         let task_id = status.task_id.clone();
                         let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
-                        let result =
-                            browser_bot::open_task(&app, &format!("{url}&apw-task={task_id}"));
+                        let mut task_url = reqwest::Url::parse(&format!("{url}&apw-task={task_id}"))
+                            .map_err(|err| err.to_string())?;
+                        if let Some((province, city, district)) = &checkout_area {
+                            let fragment = format!(
+                                "{}&apw-province={province}&apw-city={city}&apw-district={district}",
+                                task_url.fragment().unwrap_or_default()
+                            );
+                            task_url.set_fragment(Some(&fragment));
+                        }
+                        let result = browser_bot::open_task(&app, task_url.as_str());
                         let stage = if result.is_ok() { "launched" } else { "failed" };
                         if let Some(status) = bridge.advance_task(
                             stage,

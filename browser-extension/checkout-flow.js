@@ -9,6 +9,7 @@
   const storeNumber = params.get('apw-store');
   const partNumber = (params.get('apw-part') || '').toUpperCase();
   const taskId = params.get('apw-task');
+  const area = Object.fromEntries(['province', 'city', 'district'].map((key) => [key, params.get(`apw-${key}`)]));
   const ORDER_CONFIG_KEY = 'apwOrderConfig';
   const GUEST_TEXT = /^(?:(?:以访客身份|以游客身份)(?:继续|结[账帐]|购买)|(?:继续)?以访客身份结[账帐]|访客结[账帐]|访客继续|continue as (?:a )?guest|guest checkout)$/i;
   let done = false;
@@ -105,6 +106,12 @@
       notice('请先在扩展中保存并启用结账资料，或在 Apple 页面手动继续。');
       return false;
     }
+    const verifyPhone = Array.from(document.querySelectorAll('button, [role="button"]')).find((element) =>
+      visible(element) && /^(?:验证|verify)$/i.test((element.textContent || '').trim()));
+    if (verifyPhone) {
+      notice('请在 Apple 页面完成联系人手机号码验证。');
+      return false;
+    }
     const required = Array.from(document.querySelectorAll('input[required], textarea[required], select[required], input[aria-required="true"], textarea[aria-required="true"], select[aria-required="true"]'))
       .filter(visible);
     const missing = required.some((field) => {
@@ -127,6 +134,79 @@
   function selectedPickupStore(number) {
     const candidates = Array.from(document.querySelectorAll('input[type="radio"].form-selector-input'));
     return candidates.find((input) => input.value === number && visible(input));
+  }
+
+  function radioLabel(input) {
+    return (input.labels?.[0]?.textContent || input.closest('label')?.textContent || '').trim();
+  }
+
+  function pickupMode() {
+    return Array.from(document.querySelectorAll('input[type="radio"]')).find((input) =>
+      visible(input) && /^(?:我要取货|到店取货|自行取货|i(?:'|’)?ll pick it up)$/i.test(radioLabel(input)));
+  }
+
+  function areaButton(name) {
+    const normalized = (text) => text.trim().replace(/[省市]$/, '');
+    return Array.from(document.querySelectorAll('button, [role="button"]')).find((button) =>
+      visible(button) && normalized(button.textContent || '') === normalized(name));
+  }
+
+  function choosePickupArea(flow) {
+    const target = flow.area;
+    if (!target?.province || !target?.district) {
+      notice(`缺少门店地区资料，请在 Apple 页面选择监控门店 ${flow.storeNumber}。`);
+      return;
+    }
+    const trigger = Array.from(document.querySelectorAll('button, [role="button"]')).find((button) =>
+      visible(button) && /选择地区|选择省份|搜索此地附近的零售店|编辑邮编或城市/i.test(
+        `${button.getAttribute('aria-label') || ''} ${button.textContent || ''}`));
+    if (trigger && !clickedSteps.has('open-area')) {
+      clickOnce('open-area', trigger, '正在打开取货地区选择器…');
+      return;
+    }
+    for (const [key, name] of [
+      ['province', target.province],
+      ['city', target.city !== target.province ? target.city : null],
+      ['district', target.district],
+    ]) {
+      if (!name || clickedSteps.has(`area-${key}`)) continue;
+      const button = areaButton(name);
+      if (button) {
+        clickOnce(`area-${key}`, button, `正在选择取货地区 ${name}…`);
+        return;
+      }
+      // Apple 地区列表异步加载；尚未出现时不试探其他按钮。
+      break;
+    }
+    notice(`请在 Apple 页面选择监控门店 ${flow.storeNumber} 所在地区。`);
+  }
+
+  function pickupDate() {
+    return Array.from(document.querySelectorAll('input[type="radio"]')).filter((input) =>
+      visible(input) && /(?:October|November|December|January|February|March|April|May|June|July|August|September)\s+\d{1,2}|\d{1,2}月\s*\d{1,2}/i
+        .test(radioLabel(input)));
+  }
+
+  function pickupTimeslot() {
+    const selects = Array.from(document.querySelectorAll('select')).filter(visible);
+    return selects.find((select) => /签到时段|可选时段|check.?in.*time/i.test(
+      `${select.getAttribute('aria-label') || ''} ${select.labels?.[0]?.textContent || ''} ${select.parentElement?.textContent?.slice(0, 180) || ''}`));
+  }
+
+  function chooseTimeslot(select) {
+    const slots = Array.from(select.options || []).filter((option) =>
+      !option.disabled && /\d{1,2}:\d{2}\s*[–—-]\s*\d{1,2}:\d{2}/.test(option.textContent || ''));
+    if (!slots.length) return false;
+    if (slots.some((option) => option.selected && option.value === select.value)) return true;
+    const earliest = slots[0];
+    if (!clickedSteps.has('pickup-timeslot')) {
+      clickedSteps.add('pickup-timeslot');
+      notice('正在选择最早可用取货时段…');
+      select.value = earliest.value;
+      select.dispatchEvent(new Event('input', { bubbles: true }));
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    return false;
   }
 
   function alipayRadio() {
@@ -214,9 +294,14 @@
     }
     const fulfillment = firstShown('[data-autom="fulfillment-continue-button"]');
     if (fulfillment) {
+      const mode = pickupMode();
+      if (mode && !mode.checked) {
+        clickOnce('pickup-mode', mode, '正在选择到店取货…');
+        return;
+      }
       const store = selectedPickupStore(flow.storeNumber);
       if (!store) {
-        notice(`请在 Apple 页面选择监控门店 ${flow.storeNumber}，再继续结账。`);
+        choosePickupArea(flow);
         return;
       }
       if (!store.checked) {
@@ -228,6 +313,17 @@
         notice('无法确认本次取货门店，请手动核对。', true);
         return;
       }
+      const dates = pickupDate();
+      if (dates.length && !dates.some((date) => date.checked)) {
+        clickOnce('pickup-date', dates[0], '正在选择最早可用取货日期…');
+        return;
+      }
+      const timeslot = pickupTimeslot();
+      if (!timeslot) {
+        notice('请在 Apple 页面选择取货签到时间段，然后继续结账。');
+        return;
+      }
+      if (!chooseTimeslot(timeslot)) return;
       clickOnce('fulfillment', fulfillment, '正在继续到取货资料…');
       return;
     }
@@ -283,7 +379,7 @@
       }
     }
     if (markedBag && !begun) {
-      const started = await chrome.runtime.sendMessage({ type: 'apw-begin-checkout', storeNumber, partNumber, taskId });
+      const started = await chrome.runtime.sendMessage({ type: 'apw-begin-checkout', storeNumber, partNumber, taskId, area });
       if (!started) { done = true; return; }
       begun = true;
       reportStage('bag');

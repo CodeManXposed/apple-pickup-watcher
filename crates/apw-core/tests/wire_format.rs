@@ -122,11 +122,21 @@ fn 跨边界的结构统一用小驼峰() {
         city: "上海".into(),
         state: "上海".into(),
         postal_code: "200062".into(),
+        address1: "上海市普陀区中山北路 3300 号".into(),
     };
     let v = to_value(&store);
     assert!(v.get("number").is_some());
     // 地址字段只在进程内用来拼取货接口的 location，不进 JSON。
-    assert!(v.get("city").is_none() && v.get("state").is_none() && v.get("postalCode").is_none());
+    assert!(
+        v.get("city").is_none()
+            && v.get("state").is_none()
+            && v.get("postalCode").is_none()
+            && v.get("address1").is_none()
+    );
+    assert_eq!(
+        store.checkout_area("zh_CN"),
+        Some(("上海", "上海", "普陀区"))
+    );
 }
 
 #[test]

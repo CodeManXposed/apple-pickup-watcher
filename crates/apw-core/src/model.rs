@@ -476,9 +476,23 @@ pub struct Store {
     /// 邮编，缺失为空。
     #[serde(skip)]
     pub postal_code: String,
+    /// Apple 门店目录中的街道地址，仅在进程内推断结账地区选择器。
+    #[serde(skip)]
+    pub address1: String,
 }
 
 impl Store {
+    /// 大陆结账地区选择器所需的省、市、区。地址无法可靠解析时交给用户选择。
+    pub fn checkout_area(&self, locale: &str) -> Option<(&str, &str, &str)> {
+        if locale != "zh_CN" || self.state.is_empty() || self.city.is_empty() {
+            return None;
+        }
+        let after_city = self.address1.split_once('市')?.1;
+        let end = after_city.find(['区', '县'])? + '区'.len_utf8();
+        let district = &after_city[..end];
+        (!district.is_empty()).then_some((self.state.as_str(), self.city.as_str(), district))
+    }
+
     /// 取货接口 `location` 参数该填什么，才能一次拿到这家店和它周边门店的库存。
     ///
     /// Apple 的取货接口按 `location` 查询时，一次响应会带上该地点附近的所有门店

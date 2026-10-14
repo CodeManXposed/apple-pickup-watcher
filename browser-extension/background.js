@@ -156,7 +156,10 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       if (!/^[A-Z0-9]{2,10}$/.test(message.storeNumber || '')) return null;
       if (!/^[A-Z0-9]{4,20}\/[A-Z]$/.test(message.partNumber || '')) return null;
       if (message.taskId && !/^[a-f0-9]{32}$/.test(message.taskId)) return null;
-      const flow = { startedAt: Date.now(), phase: 'bag', storeNumber: message.storeNumber, partNumber: message.partNumber, taskId: message.taskId || null };
+      const area = message.area;
+      if (area && Object.values(area).some((value) => value !== null &&
+          (typeof value !== 'string' || value.length > 30 || !/^[\p{Script=Han}A-Za-z\s-]+$/u.test(value)))) return null;
+      const flow = { startedAt: Date.now(), phase: 'bag', storeNumber: message.storeNumber, partNumber: message.partNumber, taskId: message.taskId || null, area };
       await chrome.storage.session.set({ [key]: flow });
       return flow;
     }

@@ -152,10 +152,15 @@ test('pickup fulfillment selects only the monitored store before continuing', as
   target.value = 'R683';
   target.checked = false;
   const fulfillment = button('继续');
+  const timeslot = button('');
+  timeslot.value = '12:30';
+  timeslot.parentElement = { textContent: '可选时段' };
+  timeslot.options = [{ value: '12:30', textContent: '12:30 – 12:45', selected: true }];
   const other = button('其他门店');
   other.value = 'R999';
   const selectors = {
     'input[type="radio"].form-selector-input': [other, target],
+    select: [timeslot],
     '[data-autom="fulfillment-continue-button"]': [fulfillment],
     '[role="dialog"]': [],
   };
@@ -167,6 +172,86 @@ test('pickup fulfillment selects only the monitored store before continuing', as
   target.checked = true;
   await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
   assert.equal(fulfillment.clicks, 1);
+});
+
+test('pickup selects pickup mode before looking for a store', async () => {
+  const mode = button('');
+  mode.labels = [{ textContent: '我要取货' }];
+  mode.checked = false;
+  const fulfillment = button('继续');
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked',
+    selectors: {
+      'input[type="radio"]': [mode],
+      'input[type="radio"].form-selector-input': [],
+      '[data-autom="fulfillment-continue-button"]': [fulfillment],
+      '[role="dialog"]': [],
+    },
+  });
+  assert.equal(mode.clicks, 1);
+  assert.equal(fulfillment.clicks, 0);
+});
+
+test('pickup opens area selector when the monitored store is not listed', async () => {
+  const trigger = button('选择地区');
+  const fulfillment = button('继续');
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', candidates: [trigger],
+    flowProps: { area: { province: '上海', city: '上海', district: '普陀区' } },
+    selectors: {
+      'input[type="radio"].form-selector-input': [],
+      '[data-autom="fulfillment-continue-button"]': [fulfillment],
+      '[role="dialog"]': [],
+    },
+  });
+  assert.equal(trigger.clicks, 1);
+  assert.equal(fulfillment.clicks, 0);
+});
+
+test('pickup waits for a check-in slot before continuing', async () => {
+  const target = button('上海环球港');
+  target.value = 'R683';
+  target.checked = true;
+  const fulfillment = button('继续');
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked',
+    selectors: {
+      'input[type="radio"].form-selector-input': [target],
+      select: [],
+      '[data-autom="fulfillment-continue-button"]': [fulfillment],
+      '[role="dialog"]': [],
+    },
+  });
+  assert.equal(fulfillment.clicks, 0);
+});
+
+test('pickup selects the earliest offered date and check-in slot', async () => {
+  const store = button('上海环球港');
+  store.value = 'R683';
+  store.checked = true;
+  const date = button('');
+  date.labels = [{ textContent: 'October 15' }];
+  date.checked = false;
+  const fulfillment = button('继续');
+  const timeslot = button('');
+  timeslot.value = '';
+  timeslot.parentElement = { textContent: '可选时段' };
+  timeslot.options = [
+    { value: '', textContent: '请选择', selected: true },
+    { value: '12:30', textContent: '12:30 – 12:45', selected: false },
+  ];
+  timeslot.dispatchEvent = () => {};
+  const selectors = {
+    'input[type="radio"].form-selector-input': [store],
+    'input[type="radio"]': [date],
+    select: [timeslot],
+    '[data-autom="fulfillment-continue-button"]': [fulfillment],
+    '[role="dialog"]': [],
+  };
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
+  assert.equal(date.clicks, 1);
+  assert.equal(fulfillment.clicks, 0);
+  date.checked = true;
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
+  assert.equal(timeslot.value, '12:30');
+  assert.equal(fulfillment.clicks, 0);
 });
 
 test('contact step waits for profile fill and required fields before continuing', async () => {
@@ -188,6 +273,21 @@ test('contact step waits for profile fill and required fields before continuing'
   required.value = 'pickup@example.test';
   await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors, profileReady: true });
   assert.equal(continueButton.clicks, 1);
+});
+
+test('pickup contact waits for Apple phone verification', async () => {
+  const continueButton = button('继续');
+  const verify = button('验证');
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', profileReady: true,
+    candidates: [verify],
+    selectors: {
+      '.rs-pickup-button button': [continueButton],
+      '[role="dialog"]': [],
+      'input[required], textarea[required], select[required], input[aria-required="true"], textarea[aria-required="true"], select[aria-required="true"]': [],
+      'input, textarea, select': [],
+    },
+  });
+  assert.equal(continueButton.clicks, 0);
 });
 
 test('hidden buttons from earlier checkout steps do not block the visible contact step', async () => {

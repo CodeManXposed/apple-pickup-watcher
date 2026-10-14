@@ -562,6 +562,8 @@ struct RawStore {
 #[serde(rename_all = "camelCase")]
 struct RawAddress {
     #[serde(default)]
+    address1: String,
+    #[serde(default)]
     city: String,
     #[serde(default)]
     state_name: String,
@@ -663,6 +665,7 @@ fn push_store(
         city: raw.address.city.trim().to_string(),
         state: state.to_string(),
         postal_code: raw.address.postal_code.trim().to_string(),
+        address1: raw.address.address1.trim().to_string(),
     });
 }
 
