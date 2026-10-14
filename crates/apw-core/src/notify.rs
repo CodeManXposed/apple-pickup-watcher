@@ -756,20 +756,29 @@ impl Notifier for Discord {
                 "消息超过 Discord 的 2000 字符限制".to_string(),
             ));
         }
-        let mut resp = self
+        let request = self
             .http
             .post(url)
             .timeout(self.timeout)
             .json(&serde_json::json!({
                 "content": content,
                 "allowed_mentions": { "parse": [] },
-            }))
-            .send()
-            .await
-            .map_err(|e| NotifyError::Transport {
-                channel: self.name.clone(),
-                detail: describe_http_error(e),
-            })?;
+            }));
+        // 连接或 TLS 握手失败时请求尚未送达 Discord，可以安全地重试一次。
+        // 已发出请求后的超时不重试，避免在 Discord 实际收下消息时重复推送。
+        let retry = request.try_clone();
+        let first = request.send().await;
+        let mut resp = match (first, retry) {
+            (Err(error), Some(retry)) if error.is_connect() => {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                retry.send().await
+            }
+            (other, _) => other,
+        }
+        .map_err(|e| NotifyError::Transport {
+            channel: self.name.clone(),
+            detail: describe_http_error(e),
+        })?;
 
         let status = resp.status();
         let body = read_capped(&mut resp, BARK_MAX_BODY, &self.name).await?;
