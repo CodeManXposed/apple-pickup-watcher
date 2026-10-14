@@ -493,9 +493,144 @@ fn emit_system_notification(app: &AppHandle, n: &Notification) {
     }
 }
 
+fn open_auto_add(app: &AppHandle, gate: &mut AutoOpenBag, target: &Target) -> Result<(), String> {
+    let checkout_area = app
+        .state::<AppState>()
+        .catalog
+        .store_by_number(&target.locale, &target.store_number)
+        .and_then(|store| {
+            store
+                .checkout_area(&target.locale)
+                .map(|(province, city, district)| {
+                    (province.to_string(), city.to_string(), district.to_string())
+                })
+        });
+    gate.open_if_needed(
+        true,
+        &target.locale,
+        Some((target.part_number.as_str(), target.store_number.as_str())),
+        |url| {
+            let bridge = app.state::<PaymentBridge>();
+            let status = bridge.start_task(&target.part_number, &target.store_number);
+            let task_id = status.task_id.clone();
+            let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
+            let result = browser_task_url(
+                url,
+                &task_id,
+                &target.product_name,
+                checkout_area.as_ref().map(|(province, city, district)| {
+                    (province.as_str(), city.as_str(), district.as_str())
+                }),
+            )
+            .and_then(|task_url| browser_bot::open_task(app, task_url.as_str()));
+            let stage = if result.is_ok() { "launched" } else { "failed" };
+            if let Some(status) = bridge.advance_task(
+                stage,
+                &target.part_number,
+                &target.store_number,
+                &task_id,
+            ) {
+                let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
+            }
+            if result.is_ok() {
+                let watchdog_app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(90)).await;
+                    let bridge = watchdog_app.state::<PaymentBridge>();
+                    if let Some(status) = bridge.fail_if_stage(&task_id, "launched") {
+                        let _ = watchdog_app.emit(payment_bridge::STATUS_CHANNEL, status);
+                        let _ = watchdog_app.emit(
+                            NOTICE_CHANNEL,
+                            "商品页在 90 秒内未确认加入购物袋；请检查浏览器页面或 Apple 的访问限制。",
+                        );
+                    }
+                });
+            }
+            result
+        },
+    )
+}
+
+fn retryable_target<'a>(
+    snapshot: &'a [TargetState],
+    preferred: Option<&Target>,
+) -> Option<&'a Target> {
+    let valid = |state: &TargetState| {
+        state.availability.is_in_stock()
+            && region_by_locale(&state.target.locale)
+                .and_then(|region| region.auto_add_url(&state.target.part_number))
+                .is_some()
+            && (2..=10).contains(&state.target.store_number.len())
+            && state
+                .target
+                .store_number
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric())
+    };
+    let preferred_key = preferred.map(Target::key);
+    snapshot
+        .iter()
+        .find(|state| valid(state) && preferred_key.as_ref() == Some(&state.target.key()))
+        .or_else(|| snapshot.iter().find(|state| valid(state)))
+        .map(|state| &state.target)
+}
+
+#[cfg(test)]
+mod retry_target_tests {
+    use super::*;
+    use apw_core::model::{Availability, UnknownReason};
+
+    #[test]
+    fn retries_only_a_currently_stocked_valid_target() {
+        let target = Target {
+            locale: "zh_CN".into(),
+            store_number: "R683".into(),
+            store_title: "测试门店".into(),
+            part_number: "MJYE4CH/A".into(),
+            product_name: "测试商品".into(),
+            companion_part: None,
+            pickup_location: None,
+        };
+        let mut state = TargetState {
+            target,
+            availability: Availability::Unknown(UnknownReason::NotYetChecked),
+            last_checked_ms: None,
+            consecutive_failures: 0,
+        };
+        assert!(retryable_target(&[state.clone()], None).is_none());
+        state.availability = Availability::OutOfStock;
+        assert!(retryable_target(&[state.clone()], None).is_none());
+        state.availability = Availability::InStock;
+        assert_eq!(
+            retryable_target(&[state.clone()], None)
+                .unwrap()
+                .store_number,
+            "R683"
+        );
+        let preferred = state.clone();
+        let mut earlier = state.clone();
+        earlier.target.store_number = "R001".into();
+        let candidates = [earlier, preferred.clone()];
+        assert_eq!(
+            retryable_target(&candidates, Some(&preferred.target))
+                .unwrap()
+                .store_number,
+            "R683"
+        );
+        state.target.part_number = "../bag".into();
+        assert!(retryable_target(&[state.clone()], None).is_none());
+        state.target.part_number = "MJYE4CH/A".into();
+        state.target.store_number = "bad/store".into();
+        assert!(retryable_target(&[state], None).is_none());
+    }
+}
+
 /// 消费引擎事件：转发给前端，并在有货时发提醒。
 async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Event>) {
     let mut auto_open_bag = AutoOpenBag::default();
+    let mut watch_running = false;
+    let mut auto_add_enabled = app.state::<AppState>().settings_snapshot().auto_add_to_bag;
+    let mut pending_retry: Option<Target> = None;
     let (notifications, pending) = notification_queue::channel();
     let notification_app = app.clone();
     tauri::async_runtime::spawn(notification_queue::run(pending, move |notification| {
@@ -514,6 +649,8 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
 
         if let Event::RunStateChanged { running } = &event {
             auto_open_bag.on_run_state_changed(*running);
+            watch_running = *running;
+            pending_retry = None;
         }
 
         if let Event::InStock { state } = &event {
@@ -526,6 +663,11 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
                 .try_state::<AppState>()
                 .map(|s| s.settings_snapshot())
                 .unwrap_or_default();
+            if settings.auto_add_to_bag && !auto_add_enabled {
+                auto_open_bag.on_auto_add_enabled();
+                pending_retry = None;
+            }
+            auto_add_enabled = settings.auto_add_to_bag;
 
             let notification = match region_by_locale(&target.locale) {
                 Some(region) if settings.auto_add_to_bag => notification.with_url(
@@ -550,63 +692,13 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
                 let _ = app.emit(NOTICE_CHANNEL, "提醒发送任务已停止，无法发送到货提醒");
             }
 
+            if !watch_running {
+                continue;
+            }
+
             use tauri_plugin_opener::OpenerExt;
             let open_result = if settings.auto_add_to_bag {
-                let checkout_area = app
-                    .state::<AppState>()
-                    .catalog
-                    .store_by_number(&target.locale, &target.store_number)
-                    .and_then(|store| {
-                        store
-                            .checkout_area(&target.locale)
-                            .map(|(province, city, district)| {
-                                (province.to_string(), city.to_string(), district.to_string())
-                            })
-                    });
-                auto_open_bag.open_if_needed(
-                    true,
-                    &target.locale,
-                    Some((target.part_number.as_str(), target.store_number.as_str())),
-                    |url| {
-                        let bridge = app.state::<PaymentBridge>();
-                        let status = bridge.start_task(&target.part_number, &target.store_number);
-                        let task_id = status.task_id.clone();
-                        let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
-                        let result = browser_task_url(
-                            url,
-                            &task_id,
-                            &target.product_name,
-                            checkout_area.as_ref().map(|(province, city, district)| {
-                                (province.as_str(), city.as_str(), district.as_str())
-                            }),
-                        )
-                        .and_then(|task_url| browser_bot::open_task(&app, task_url.as_str()));
-                        let stage = if result.is_ok() { "launched" } else { "failed" };
-                        if let Some(status) = bridge.advance_task(
-                            stage,
-                            &target.part_number,
-                            &target.store_number,
-                            &task_id,
-                        ) {
-                            let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
-                        }
-                        if result.is_ok() {
-                            let watchdog_app = app.clone();
-                            tauri::async_runtime::spawn(async move {
-                                tokio::time::sleep(Duration::from_secs(90)).await;
-                                let bridge = watchdog_app.state::<PaymentBridge>();
-                                if let Some(status) = bridge.fail_if_stage(&task_id, "launched") {
-                                    let _ = watchdog_app.emit(payment_bridge::STATUS_CHANNEL, status);
-                                    let _ = watchdog_app.emit(
-                                        NOTICE_CHANNEL,
-                                        "商品页在 90 秒内未确认加入购物袋；请检查浏览器页面或 Apple 的访问限制。",
-                                    );
-                                }
-                            });
-                        }
-                        result
-                    },
-                )
+                open_auto_add(&app, &mut auto_open_bag, target)
             } else {
                 auto_open_bag.open_if_needed(
                     settings.open_bag_on_hit,
@@ -619,8 +711,52 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
                     },
                 )
             };
+            if settings.auto_add_to_bag {
+                if open_result.is_err() {
+                    pending_retry = Some(target.clone());
+                } else if auto_open_bag.has_opened() {
+                    pending_retry = None;
+                }
+            }
             if let Err(err) = open_result {
                 let _ = app.emit(NOTICE_CHANNEL, format!("打开购买页面失败：{err}"));
+                if settings.auto_add_to_bag && auto_open_bag.retry_limit_reached() {
+                    let _ = app.emit(
+                        NOTICE_CHANNEL,
+                        "自动加车连续三次启动失败，本次监控不再重试；检查独立浏览器后暂停并重新开始监控。",
+                    );
+                }
+            }
+        }
+
+        if let Event::CycleComplete { snapshot, .. } = &event {
+            let settings = app.state::<AppState>().settings_snapshot();
+            if settings.auto_add_to_bag && !auto_add_enabled {
+                auto_open_bag.on_auto_add_enabled();
+                pending_retry = None;
+            }
+            auto_add_enabled = settings.auto_add_to_bag;
+            if !auto_add_enabled {
+                pending_retry = None;
+            }
+            let ready_for_attempt = auto_open_bag.should_try_on_cycle();
+            if !watch_running || !settings.auto_add_to_bag || !ready_for_attempt {
+                continue;
+            }
+            let Some(target) = retryable_target(snapshot, pending_retry.as_ref()) else {
+                continue;
+            };
+            if let Err(err) = open_auto_add(&app, &mut auto_open_bag, target) {
+                pending_retry = Some(target.clone());
+                let _ = app.emit(NOTICE_CHANNEL, format!("重试打开购买页面失败：{err}"));
+                if auto_open_bag.retry_limit_reached() {
+                    let _ = app.emit(
+                        NOTICE_CHANNEL,
+                        "自动加车连续三次启动失败，本次监控不再重试；检查独立浏览器后暂停并重新开始监控。",
+                    );
+                }
+            } else if auto_open_bag.has_opened() {
+                pending_retry = None;
             }
         }
     }
