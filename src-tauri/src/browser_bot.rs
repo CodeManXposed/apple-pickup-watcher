@@ -6,7 +6,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Manager};
@@ -90,11 +92,11 @@ fn extension_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(extension)
 }
 
-/// Chromium 对无 manifest key 的解压扩展以路径的 SHA-256 前 16 字节生成 ID。
-/// 用启动参数里的同一条绝对路径，才能直接打开这份扩展自己的资料页面。
-fn extension_id(path: &Path) -> String {
+/// Chromium 对无 manifest key 的解压扩展以路径的原始字节生成 ID。
+/// 固定 manifest key 后，即使应用被移动，扩展也会继续使用原来的 Chrome 存储。
+fn extension_path_bytes(path: &Path) -> Vec<u8> {
     #[cfg(windows)]
-    let bytes = {
+    {
         use std::os::windows::ffi::OsStrExt;
         let mut path_utf16: Vec<u16> = path.as_os_str().encode_wide().collect();
         if path_utf16.len() >= 2
@@ -107,12 +109,15 @@ fn extension_id(path: &Path) -> String {
             .into_iter()
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<_>>()
-    };
+    }
     #[cfg(unix)]
-    let bytes = {
+    {
         use std::os::unix::ffi::OsStrExt;
         path.as_os_str().as_bytes().to_vec()
-    };
+    }
+}
+
+fn extension_id_from_key(bytes: &[u8]) -> String {
     let hash = Sha256::digest(bytes);
     let mut id = String::with_capacity(32);
     for &byte in &hash[..16] {
@@ -120,6 +125,268 @@ fn extension_id(path: &Path) -> String {
         id.push(char::from(b'a' + (byte & 0x0f)));
     }
     id
+}
+
+#[cfg(test)]
+fn extension_id(path: &Path) -> String {
+    extension_id_from_key(&extension_path_bytes(path))
+}
+
+#[derive(Debug)]
+struct InstalledExtension {
+    dir: PathBuf,
+    id: String,
+}
+
+fn read_extension_key(path: &Path) -> Result<Vec<u8>, String> {
+    let encoded = fs::read_to_string(path).map_err(|e| format!("读取扩展身份失败：{e}"))?;
+    let key = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .map_err(|_| "已保存的扩展身份损坏；请保留浏览器资料并检查 extension-key".to_owned())?;
+    if key.is_empty() {
+        return Err("已保存的扩展身份为空；请保留浏览器资料并检查 extension-key".into());
+    }
+    Ok(key)
+}
+
+/// Chrome 把旧解压扩展的路径和 ID 放在独立配置的 Secure Preferences 中。
+/// 只读取扩展元数据，不读取联系人、地址或结账资料。
+fn legacy_extension_key(root: &Path) -> Result<Option<Vec<u8>>, String> {
+    let mut candidates = Vec::<Vec<u8>>::new();
+    let mut built_in_ids = std::collections::HashSet::<String>::new();
+    for file in ["Secure Preferences", "Preferences"] {
+        let path = root.join("profile/Default").join(file);
+        if !path.exists() {
+            continue;
+        }
+        let data = fs::read(&path).map_err(|e| format!("读取 Chrome 扩展元数据失败：{e}"))?;
+        let prefs: Value = serde_json::from_slice(&data)
+            .map_err(|e| format!("Chrome 扩展元数据损坏，已保留原文件：{e}"))?;
+        let Some(settings) = prefs
+            .pointer("/extensions/settings")
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        for (id, setting) in settings {
+            let location = setting.get("location").and_then(Value::as_u64);
+            if location == Some(5) {
+                built_in_ids.insert(id.clone());
+            }
+            if location != Some(8) {
+                continue;
+            }
+            let Some(raw_path) = setting.get("path").and_then(Value::as_str) else {
+                continue;
+            };
+            let old_path = Path::new(raw_path);
+            if old_path
+                .file_name()
+                .is_none_or(|name| name != "browser-extension")
+                && !old_path.starts_with(root.join("extensions"))
+            {
+                continue;
+            }
+            let key = if old_path.join("manifest.json").is_file() {
+                let manifest: Value = serde_json::from_slice(
+                    &fs::read(old_path.join("manifest.json"))
+                        .map_err(|e| format!("读取旧扩展清单失败：{e}"))?,
+                )
+                .map_err(|e| format!("旧扩展清单损坏：{e}"))?;
+                if manifest.get("name").and_then(Value::as_str) != Some("Apple Pickup Watcher") {
+                    return Err("Chrome 配置中的扩展路径与 Apple Pickup Watcher 不匹配".into());
+                }
+                match manifest.get("key").and_then(Value::as_str) {
+                    Some(encoded) => base64::engine::general_purpose::STANDARD
+                        .decode(encoded)
+                        .map_err(|_| "旧扩展清单中的身份无效".to_owned())?,
+                    None => extension_path_bytes(old_path),
+                }
+            } else {
+                extension_path_bytes(old_path)
+            };
+            if extension_id_from_key(&key) != *id {
+                return Err("Chrome 扩展 ID 与原路径不一致；已保留原浏览器资料".into());
+            }
+            if !candidates.contains(&key) {
+                candidates.push(key);
+            }
+        }
+    }
+    match candidates.len() {
+        0 => {
+            let storage = root.join("profile/Default/Local Extension Settings");
+            if storage.is_dir() {
+                for entry in
+                    fs::read_dir(storage).map_err(|e| format!("检查旧扩展存储失败：{e}"))?
+                {
+                    let name = entry
+                        .map_err(|e| format!("检查旧扩展存储失败：{e}"))?
+                        .file_name();
+                    let id = name.to_string_lossy();
+                    if id.len() == 32
+                        && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+                        && !built_in_ids.contains(id.as_ref())
+                    {
+                        return Err(
+                            "浏览器中已有扩展资料，但无法确认原扩展身份；已保留原资料".into()
+                        );
+                    }
+                }
+            }
+            Ok(None)
+        }
+        1 => Ok(candidates.pop()),
+        _ => Err("浏览器资料中找到多个旧扩展身份，无法安全选择；已保留原资料".into()),
+    }
+}
+
+fn extension_key(root: &Path, bundled: &Path) -> Result<Vec<u8>, String> {
+    let path = root.join("extension-key");
+    if path.exists() {
+        return read_extension_key(&path);
+    }
+    let key = legacy_extension_key(root)?.unwrap_or_else(|| extension_path_bytes(bundled));
+    fs::create_dir_all(root).map_err(|e| format!("建立浏览器资料目录失败：{e}"))?;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(root).map_err(|e| format!("保存扩展身份失败：{e}"))?;
+    temporary
+        .write_all(
+            base64::engine::general_purpose::STANDARD
+                .encode(&key)
+                .as_bytes(),
+        )
+        .map_err(|e| format!("保存扩展身份失败：{e}"))?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|e| format!("保存扩展身份失败：{e}"))?;
+    match temporary.persist_noclobber(&path) {
+        Ok(_) => Ok(key),
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            read_extension_key(&path)
+        }
+        Err(error) => Err(format!("保存扩展身份失败：{}", error.error)),
+    }
+}
+
+fn extension_files(source: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
+    let mut files = Vec::new();
+    let mut dirs = vec![source.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).map_err(|e| format!("读取内置扩展失败：{e}"))? {
+            let entry = entry.map_err(|e| format!("读取内置扩展失败：{e}"))?;
+            let kind = entry
+                .file_type()
+                .map_err(|e| format!("读取内置扩展失败：{e}"))?;
+            if kind.is_dir() {
+                dirs.push(entry.path());
+            } else if kind.is_file() {
+                let relative = entry
+                    .path()
+                    .strip_prefix(source)
+                    .map_err(|e| format!("读取内置扩展失败：{e}"))?
+                    .to_path_buf();
+                files.push((
+                    relative,
+                    fs::read(entry.path()).map_err(|e| format!("读取内置扩展失败：{e}"))?,
+                ));
+            } else {
+                return Err("内置扩展包含不支持的文件类型".into());
+            }
+        }
+    }
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(files)
+}
+
+fn install_extension(root: &Path, bundled: &Path) -> Result<InstalledExtension, String> {
+    let key = extension_key(root, bundled)?;
+    let id = extension_id_from_key(&key);
+    let files = extension_files(bundled)?;
+    let mut hash = Sha256::new();
+    for (path, bytes) in &files {
+        let name = path.to_str().ok_or("内置扩展文件名无效")?;
+        hash.update((name.len() as u64).to_le_bytes());
+        hash.update(name.as_bytes());
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    }
+    let version = format!("{:x}", hash.finalize());
+    let manifest = files
+        .iter()
+        .find(|(path, _)| path == Path::new("manifest.json"))
+        .ok_or("应用包内缺少浏览器扩展清单")?;
+    let mut manifest: Value =
+        serde_json::from_slice(&manifest.1).map_err(|e| format!("内置扩展清单损坏：{e}"))?;
+    let object = manifest.as_object_mut().ok_or("内置扩展清单不是对象")?;
+    object.insert(
+        "key".into(),
+        Value::String(base64::engine::general_purpose::STANDARD.encode(&key)),
+    );
+    let manifest =
+        serde_json::to_vec_pretty(&manifest).map_err(|e| format!("生成扩展清单失败：{e}"))?;
+    let extensions = root.join("extensions");
+    let destination = extensions.join(version);
+    let verify = || -> Result<(), String> {
+        for (path, bytes) in &files {
+            let expected = if path == Path::new("manifest.json") {
+                &manifest
+            } else {
+                bytes
+            };
+            if fs::read(destination.join(path)).ok().as_deref() != Some(expected) {
+                return Err("已安装的扩展副本损坏；请保留浏览器资料并检查扩展目录".into());
+            }
+        }
+        Ok(())
+    };
+    if destination.exists() {
+        verify()?;
+        return Ok(InstalledExtension {
+            dir: destination,
+            id,
+        });
+    }
+    fs::create_dir_all(&extensions).map_err(|e| format!("建立扩展目录失败：{e}"))?;
+    let staging = extensions.join(format!(".staging-{}", uuid::Uuid::new_v4()));
+    let result = (|| {
+        fs::create_dir(&staging).map_err(|e| format!("建立扩展副本失败：{e}"))?;
+        for (path, bytes) in &files {
+            let target = staging.join(path);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|e| format!("复制扩展失败：{e}"))?;
+            }
+            fs::write(
+                &target,
+                if path == Path::new("manifest.json") {
+                    &manifest
+                } else {
+                    bytes
+                },
+            )
+            .map_err(|e| format!("复制扩展失败：{e}"))?;
+        }
+        match fs::rename(&staging, &destination) {
+            Ok(()) => Ok(()),
+            Err(_) if destination.exists() => verify(),
+            Err(e) => Err(format!("安装扩展失败：{e}")),
+        }
+    })();
+    let _ = fs::remove_dir_all(&staging);
+    result?;
+    Ok(InstalledExtension {
+        dir: destination,
+        id,
+    })
+}
+
+fn installed_extension(app: &AppHandle) -> Result<InstalledExtension, String> {
+    install_extension(&root(app)?, &extension_dir(app)?)
+}
+
+pub(crate) fn installed_extension_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    installed_extension(app).map(|extension| extension.dir)
 }
 
 fn current(root: &Path, platform: &str) -> Option<(String, PathBuf)> {
@@ -135,9 +402,11 @@ fn current(root: &Path, platform: &str) -> Option<(String, PathBuf)> {
 pub(crate) fn ready(app: &AppHandle) -> Result<BrowserReady, String> {
     let platform = platform()?;
     let root = root(app)?;
-    current(&root, platform)
+    let browser = current(&root, platform)
         .map(|(version, _)| BrowserReady { version })
-        .ok_or_else(|| "请先在 Profile 页准备独立浏览器".into())
+        .ok_or_else(|| "请先在 Profile 页准备独立浏览器".to_owned())?;
+    installed_extension(app)?;
+    Ok(browser)
 }
 
 fn valid_version(version: &str) -> bool {
@@ -295,24 +564,27 @@ pub(crate) async fn prepare(
 }
 
 /// 在独立配置文件里打开一个购买任务。启动参数不会触碰用户日常 Chrome 的资料。
-fn launch(app: &AppHandle, url: &str) -> Result<(), String> {
+fn launch(app: &AppHandle, task_url: Option<&str>) -> Result<(), String> {
     let platform = platform()?;
     let root = root(app)?;
     let (_, binary) =
         current(&root, platform).ok_or_else(|| "请先在 Profile 页准备独立浏览器".to_owned())?;
-    let extension = extension_dir(app)?;
+    let extension = installed_extension(app)?;
+    let url = task_url
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("chrome-extension://{}/profile.html", extension.id));
     let profile = root.join("profile");
     fs::create_dir_all(&profile).map_err(|e| format!("建立浏览器资料目录失败：{e}"))?;
     Command::new(binary)
         .arg(format!("--user-data-dir={}", profile.display()))
         .arg(format!(
             "--disable-extensions-except={}",
-            extension.display()
+            extension.dir.display()
         ))
-        .arg(format!("--load-extension={}", extension.display()))
+        .arg(format!("--load-extension={}", extension.dir.display()))
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
-        .arg(url)
+        .arg(&url)
         .spawn()
         .map_err(|e| format!("启动独立浏览器失败：{e}"))?;
     Ok(())
@@ -328,12 +600,11 @@ pub(crate) fn open_task(app: &AppHandle, url: &str) -> Result<(), String> {
     {
         return Err("只能打开 Apple 官方购买页面".into());
     }
-    launch(app, url)
+    launch(app, Some(url))
 }
 
 pub(crate) fn open_profile(app: &AppHandle) -> Result<(), String> {
-    let id = extension_id(&extension_dir(app)?);
-    launch(app, &format!("chrome-extension://{id}/profile.html"))
+    launch(app, None)
 }
 
 #[cfg(test)]
@@ -346,6 +617,132 @@ mod tests {
         assert_eq!(
             extension_id(Path::new("/tmp/apw-browser-extension")),
             "kicnhjehhdlophpgfhejebhjgmpekapm"
+        );
+    }
+
+    #[test]
+    fn moving_and_updating_the_app_keeps_the_old_extension_storage_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("browser-bot");
+        let old_bundle = temp.path().join("old-app/Resources/browser-extension");
+        let new_bundle = temp.path().join("new-app/Resources/browser-extension");
+        fs::create_dir_all(&new_bundle).unwrap();
+        fs::write(
+            new_bundle.join("manifest.json"),
+            r#"{"manifest_version":3,"name":"Apple Pickup Watcher","version":"1"}"#,
+        )
+        .unwrap();
+        fs::write(new_bundle.join("background.js"), "self.initial = true;").unwrap();
+        let original_id = extension_id(&old_bundle);
+        let preferences = root.join("profile/Default/Secure Preferences");
+        fs::create_dir_all(preferences.parent().unwrap()).unwrap();
+        fs::write(
+            &preferences,
+            serde_json::to_vec(&serde_json::json!({
+                "extensions": {"settings": {
+                    (original_id.clone()): {"location": 8, "path": old_bundle.to_str().unwrap()}
+                }}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let storage = root
+            .join("profile/Default/Local Extension Settings")
+            .join(&original_id);
+        fs::create_dir_all(&storage).unwrap();
+        fs::write(storage.join("sentinel"), "saved profile").unwrap();
+
+        let first = install_extension(&root, &new_bundle).unwrap();
+        assert_eq!(first.id, original_id);
+        assert_ne!(first.dir, old_bundle);
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(first.dir.join("manifest.json")).unwrap()).unwrap();
+        let key = base64::engine::general_purpose::STANDARD
+            .decode(manifest["key"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(key, extension_path_bytes(&old_bundle));
+        assert_eq!(
+            fs::read_to_string(storage.join("sentinel")).unwrap(),
+            "saved profile"
+        );
+
+        fs::write(new_bundle.join("background.js"), "self.updated = true;").unwrap();
+        let second = install_extension(&root, &new_bundle).unwrap();
+        assert_eq!(second.id, original_id);
+        assert_ne!(second.dir, first.dir);
+        assert!(
+            first.dir.exists(),
+            "running Chrome can finish using the old copy"
+        );
+        assert_eq!(
+            fs::read_to_string(storage.join("sentinel")).unwrap(),
+            "saved profile"
+        );
+    }
+
+    #[test]
+    fn ambiguous_legacy_ids_stop_before_creating_a_new_profile_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("browser-bot");
+        let bundled = temp.path().join("current/browser-extension");
+        fs::create_dir_all(&bundled).unwrap();
+        fs::write(
+            bundled.join("manifest.json"),
+            r#"{"manifest_version":3,"name":"Apple Pickup Watcher","version":"1"}"#,
+        )
+        .unwrap();
+        let old_a = temp.path().join("old-a/browser-extension");
+        let old_b = temp.path().join("old-b/browser-extension");
+        let preferences = root.join("profile/Default/Secure Preferences");
+        fs::create_dir_all(preferences.parent().unwrap()).unwrap();
+        fs::write(
+            &preferences,
+            serde_json::to_vec(&serde_json::json!({
+                "extensions": {"settings": {
+                    (extension_id(&old_a)): {"location": 8, "path": old_a.to_str().unwrap()},
+                    (extension_id(&old_b)): {"location": 8, "path": old_b.to_str().unwrap()}
+                }}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            install_extension(&root, &bundled)
+                .unwrap_err()
+                .contains("多个旧扩展身份")
+        );
+        assert!(!root.join("extension-key").exists());
+        assert!(preferences.exists());
+    }
+
+    #[test]
+    fn orphaned_extension_storage_does_not_become_an_empty_profile() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("browser-bot");
+        let bundled = temp.path().join("new/browser-extension");
+        fs::create_dir_all(&bundled).unwrap();
+        fs::write(
+            bundled.join("manifest.json"),
+            r#"{"manifest_version":3,"name":"Apple Pickup Watcher","version":"1"}"#,
+        )
+        .unwrap();
+        let old_id = extension_id(&temp.path().join("missing/browser-extension"));
+        let storage = root
+            .join("profile/Default/Local Extension Settings")
+            .join(old_id);
+        fs::create_dir_all(&storage).unwrap();
+        fs::write(storage.join("sentinel"), "saved profile").unwrap();
+
+        assert!(
+            install_extension(&root, &bundled)
+                .unwrap_err()
+                .contains("无法确认原扩展身份")
+        );
+        assert!(!root.join("extension-key").exists());
+        assert_eq!(
+            fs::read_to_string(storage.join("sentinel")).unwrap(),
+            "saved profile"
         );
     }
 

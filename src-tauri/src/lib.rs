@@ -222,13 +222,9 @@ fn get_bot_status(bridge: tauri::State<'_, PaymentBridge>) -> Option<payment_bri
 
 #[tauri::command]
 fn open_extension_folder(app: AppHandle) -> Result<(), String> {
-    use tauri::path::BaseDirectory;
     use tauri_plugin_opener::OpenerExt;
 
-    let path = app
-        .path()
-        .resolve("browser-extension", BaseDirectory::Resource)
-        .map_err(|e| e.to_string())?;
+    let path = browser_bot::installed_extension_dir(&app)?;
     app.opener()
         .open_path(path.to_string_lossy().into_owned(), None::<&str>)
         .map_err(|e| e.to_string())

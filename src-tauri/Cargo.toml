@@ -28,6 +28,8 @@ tauri-plugin-single-instance = "2"
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+base64 = "0.22"
 sha2 = "0.10"
+tempfile = "3"
 tokio = { workspace = true, features = ["net", "io-util"] }
 uuid = { version = "1", features = ["v4"] }
