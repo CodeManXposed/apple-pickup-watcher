@@ -725,6 +725,106 @@ impl Discord {
     pub fn is_configured(&self) -> bool {
         !self.webhook.is_empty()
     }
+
+    async fn send_request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, NotifyError> {
+        // 连接或 TLS 握手失败时请求尚未送达 Discord，可以安全地重试一次。
+        // 已发出请求后的超时不重试，避免在 Discord 实际收下消息时重复推送。
+        let retry = request.try_clone();
+        let first = request.send().await;
+        match (first, retry) {
+            (Err(error), Some(retry)) if error.is_connect() => {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                retry.send().await
+            }
+            (other, _) => other,
+        }
+        .map_err(|e| NotifyError::Transport {
+            channel: self.name.clone(),
+            detail: describe_http_error(e),
+        })
+    }
+
+    /// 首次发送付款链接，随后编辑同一 webhook 消息中的轮换二维码。
+    /// 返回 Discord 消息 ID，由调用方按监控任务和 webhook 保存。
+    pub async fn send_or_edit(
+        &self,
+        n: &Notification,
+        message_id: Option<&str>,
+    ) -> Result<String, NotifyError> {
+        let mut url = validate_discord_webhook(&self.webhook)?;
+        let content = feishu_text(n);
+        if content.chars().count() > 2000 {
+            return Err(discord_config_err(
+                "消息超过 Discord 的 2000 字符限制".into(),
+            ));
+        }
+        let request = if let Some(id) = message_id {
+            if id.is_empty() || id.len() > 20 || !id.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(discord_config_err("已保存的 Discord 消息编号无效".into()));
+            }
+            let thread_id = url
+                .query_pairs()
+                .find(|(key, _)| key == "thread_id")
+                .map(|(_, value)| value.into_owned());
+            url.set_query(None);
+            url.path_segments_mut()
+                .map_err(|_| discord_config_err("Webhook 地址路径无效".into()))?
+                .extend(["messages", id]);
+            if let Some(thread_id) = thread_id {
+                url.query_pairs_mut().append_pair("thread_id", &thread_id);
+            }
+            self.http.patch(url)
+        } else {
+            let existing_query: Vec<_> = url
+                .query_pairs()
+                .filter(|(key, _)| key != "wait")
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect();
+            url.set_query(None);
+            {
+                let mut query = url.query_pairs_mut();
+                query.extend_pairs(existing_query);
+                query.append_pair("wait", "true");
+            }
+            self.http.post(url)
+        };
+        let mut response = self
+            .send_request(request.timeout(self.timeout).json(&serde_json::json!({
+                "content": content,
+                "allowed_mentions": { "parse": [] },
+            })))
+            .await?;
+        let status = response.status();
+        let body = read_capped(&mut response, BARK_MAX_BODY, &self.name).await?;
+        if !status.is_success() {
+            return Err(NotifyError::Rejected {
+                channel: self.name.clone(),
+                status: status.as_u16(),
+                body: summarize(&body),
+            });
+        }
+        if let Some(id) = message_id {
+            return Ok(id.to_owned());
+        }
+        let id = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value.get("id")?.as_str().map(str::to_owned));
+        match id {
+            Some(id)
+                if !id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit()) =>
+            {
+                Ok(id)
+            }
+            _ => Err(NotifyError::Remote {
+                channel: self.name.clone(),
+                code: -1,
+                message: "Discord 未返回消息编号，无法更新轮换的付款链接".into(),
+            }),
+        }
+    }
 }
 
 impl Notifier for Discord {
@@ -764,21 +864,7 @@ impl Notifier for Discord {
                 "content": content,
                 "allowed_mentions": { "parse": [] },
             }));
-        // 连接或 TLS 握手失败时请求尚未送达 Discord，可以安全地重试一次。
-        // 已发出请求后的超时不重试，避免在 Discord 实际收下消息时重复推送。
-        let retry = request.try_clone();
-        let first = request.send().await;
-        let mut resp = match (first, retry) {
-            (Err(error), Some(retry)) if error.is_connect() => {
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                retry.send().await
-            }
-            (other, _) => other,
-        }
-        .map_err(|e| NotifyError::Transport {
-            channel: self.name.clone(),
-            detail: describe_http_error(e),
-        })?;
+        let mut resp = self.send_request(request).await?;
 
         let status = resp.status();
         let body = read_capped(&mut resp, BARK_MAX_BODY, &self.name).await?;

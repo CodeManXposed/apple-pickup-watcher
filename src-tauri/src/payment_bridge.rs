@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use apw_core::notify::{Discord, Notification, Notifier};
+use apw_core::notify::{Discord, Notification, NotifyError};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -75,6 +75,35 @@ pub struct PaymentBridge {
     token: Option<String>,
     latest: RwLock<Option<(PaymentLink, Option<String>)>>,
     status: RwLock<Option<BotStatus>>,
+    discord_delivery: tokio::sync::Mutex<DiscordDelivery>,
+}
+
+#[derive(Default)]
+struct DiscordDelivery {
+    task_id: Option<String>,
+    webhook_config: String,
+    message_ids: Vec<Option<String>>,
+}
+
+impl DiscordDelivery {
+    fn use_context(&mut self, task_id: &str, webhook_config: &str) {
+        if self.task_id.as_deref() != Some(task_id) || self.webhook_config != webhook_config {
+            self.task_id = Some(task_id.to_owned());
+            self.webhook_config = webhook_config.to_owned();
+            self.message_ids.clear();
+        }
+    }
+
+    fn message_id(&self, index: usize) -> Option<&str> {
+        self.message_ids.get(index).and_then(Option::as_deref)
+    }
+
+    fn record(&mut self, index: usize, message_id: String) {
+        if self.message_ids.len() <= index {
+            self.message_ids.resize(index + 1, None);
+        }
+        self.message_ids[index] = Some(message_id);
+    }
 }
 
 impl PaymentBridge {
@@ -83,6 +112,7 @@ impl PaymentBridge {
             token: None,
             latest: RwLock::new(None),
             status: RwLock::new(None),
+            discord_delivery: tokio::sync::Mutex::new(DiscordDelivery::default()),
         }
     }
 
@@ -98,6 +128,14 @@ impl PaymentBridge {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .map(|(link, _)| link.clone())
+    }
+
+    fn is_current_link(&self, link: &PaymentLink, task_id: &str) -> bool {
+        self.latest
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|(current, id)| current.url == link.url && id.as_deref() == Some(task_id))
     }
 
     pub fn status(&self) -> Option<BotStatus> {
@@ -230,6 +268,7 @@ pub fn prepare(app: &AppHandle) -> Result<(PaymentBridge, std::net::TcpListener)
             token: Some(token),
             latest: RwLock::new(None),
             status: RwLock::new(None),
+            discord_delivery: tokio::sync::Mutex::new(DiscordDelivery::default()),
         },
         listener,
     ))
@@ -541,7 +580,11 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
             .unwrap_or_default()
             .as_secs(),
     };
-    let fresh = bridge.record(link.clone(), incoming.task_id.as_deref());
+    let Some(task_id) = incoming.task_id else {
+        respond(&mut socket, 409, origin, "{}").await;
+        return;
+    };
+    let fresh = bridge.record(link.clone(), Some(&task_id));
     let advanced = bridge.status().and_then(|status| {
         bridge.advance_task(
             "paymentLink",
@@ -556,7 +599,7 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
     }
     if fresh {
         let _ = app.emit(EVENT_CHANNEL, &link);
-        tauri::async_runtime::spawn(send_discord(app, link));
+        tauri::async_runtime::spawn(send_discord(app, link, task_id));
     }
 }
 
@@ -613,7 +656,7 @@ fn link_matches_task(link: &IncomingLink, status: Option<&BotStatus>) -> bool {
     })
 }
 
-async fn send_discord(app: AppHandle, link: PaymentLink) {
+async fn send_discord(app: AppHandle, link: PaymentLink, task_id: String) {
     let state = app.state::<AppState>();
     let settings = state.settings_snapshot();
     if settings.discord_webhook.trim().is_empty() {
@@ -631,11 +674,38 @@ async fn send_discord(app: AppHandle, link: PaymentLink) {
             "支付宝收银台页面；付款前请核对商家与金额。"
         },
     )
-    .with_url(link.url);
+    .with_url(link.url.clone());
+    let bridge = app.state::<PaymentBridge>();
+    let mut delivery = bridge.discord_delivery.lock().await;
+    if !bridge.is_current_link(&link, &task_id) {
+        return;
+    }
+    delivery.use_context(&task_id, &settings.discord_webhook);
     let mut delivered = 0;
-    for discord in Discord::from_list(&settings.discord_webhook, state.http.clone()) {
-        match discord.notify(&notification).await {
-            Ok(()) => delivered += 1,
+    for (index, discord) in Discord::from_list(&settings.discord_webhook, state.http.clone())
+        .into_iter()
+        .enumerate()
+    {
+        if !bridge.is_current_link(&link, &task_id) {
+            break;
+        }
+        let previous = delivery.message_id(index).map(str::to_owned);
+        let result = discord
+            .send_or_edit(&notification, previous.as_deref())
+            .await;
+        let result = if previous.is_some()
+            && matches!(&result, Err(NotifyError::Rejected { status: 404, .. }))
+        {
+            // 用户删除了旧消息时，新建一条继续提供当前付款链接。
+            discord.send_or_edit(&notification, None).await
+        } else {
+            result
+        };
+        match result {
+            Ok(message_id) => {
+                delivery.record(index, message_id);
+                delivered += 1;
+            }
             Err(err) => {
                 let _ = app.emit(
                     NOTICE_CHANNEL,
@@ -655,8 +725,9 @@ async fn send_discord(app: AppHandle, link: PaymentLink) {
 #[cfg(test)]
 mod tests {
     use super::{
-        IncomingLink, IncomingStatus, IncomingTask, PaymentBridge, PaymentLink, link_matches_task,
-        read_request, respond, valid_alipay_url, valid_origin, valid_task_status,
+        DiscordDelivery, IncomingLink, IncomingStatus, IncomingTask, PaymentBridge, PaymentLink,
+        link_matches_task, read_request, respond, valid_alipay_url, valid_origin,
+        valid_task_status,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -677,6 +748,23 @@ mod tests {
         assert!(!valid_alipay_url(
             "https://user:password@qr.alipay.com/abc123"
         ));
+    }
+
+    #[test]
+    fn discord_message_is_reused_only_within_the_same_task_and_webhook_set() {
+        let mut delivery = DiscordDelivery::default();
+        delivery.use_context("task-one", "hook-a;hook-b");
+        delivery.record(0, "101".into());
+        delivery.record(1, "102".into());
+        delivery.use_context("task-one", "hook-a;hook-b");
+        assert_eq!(delivery.message_id(0), Some("101"));
+        assert_eq!(delivery.message_id(1), Some("102"));
+
+        delivery.use_context("task-two", "hook-a;hook-b");
+        assert_eq!(delivery.message_id(0), None);
+        delivery.record(0, "201".into());
+        delivery.use_context("task-two", "hook-b;hook-a");
+        assert_eq!(delivery.message_id(0), None);
     }
 
     #[test]
