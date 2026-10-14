@@ -4,6 +4,7 @@ const PARENT_PREFIX = 'apwCheckoutParent:';
 const FLOW_TTL_MS = 60 * 60 * 1000;
 const BRIDGE_URL = 'http://127.0.0.1:43849/payment-link';
 const STATUS_URL = 'http://127.0.0.1:43849/task-status';
+const TASK_CHECK_URL = 'http://127.0.0.1:43849/task-check';
 
 function applePage(url) {
   try {
@@ -113,6 +114,29 @@ async function forwardStage(stage, sender, flow) {
   }
 }
 
+async function activeTask(sender, flow) {
+  if (!flow || !applePage(sender.url) ||
+      !/^[a-f0-9]{32}$/.test(flow.taskId || '')) return false;
+  const { apwBridgeToken } = await chrome.storage.local.get('apwBridgeToken');
+  if (!/^[a-f0-9]{32}$/i.test(apwBridgeToken || '')) return false;
+  try {
+    const response = await fetch(TASK_CHECK_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apwBridgeToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        partNumber: flow.partNumber, storeNumber: flow.storeNumber, taskId: flow.taskId,
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function forwardCartFailure(message, sender) {
   const page = new URL(sender.url);
   if (!applePage(sender.url) || !page.pathname.includes('/shop/buy-') ||
@@ -156,10 +180,13 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       if (!/^[A-Z0-9]{2,10}$/.test(message.storeNumber || '')) return null;
       if (!/^[A-Z0-9]{4,20}\/[A-Z]$/.test(message.partNumber || '')) return null;
       if (message.taskId && !/^[a-f0-9]{32}$/.test(message.taskId)) return null;
+      if (message.productName && (typeof message.productName !== 'string' ||
+          message.productName.length > 160 || /[\u0000-\u001f\u007f]/.test(message.productName))) return null;
       const area = message.area;
       if (area && Object.values(area).some((value) => value !== null &&
           (typeof value !== 'string' || value.length > 30 || !/^[\p{Script=Han}A-Za-z\s-]+$/u.test(value)))) return null;
-      const flow = { startedAt: Date.now(), phase: 'bag', storeNumber: message.storeNumber, partNumber: message.partNumber, taskId: message.taskId || null, area };
+      const flow = { startedAt: Date.now(), phase: 'bag', storeNumber: message.storeNumber, partNumber: message.partNumber, taskId: message.taskId || null, productName: message.productName || null, area };
+      if (!await activeTask(sender, flow)) return null;
       await chrome.storage.session.set({ [key]: flow });
       return flow;
     }
@@ -168,6 +195,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     }
     const flow = await flowFor(tabId);
     if (message?.type === 'apw-get-checkout') return flow;
+    if (message?.type === 'apw-active-task') return flow?.phase === 'guest-clicked' && await activeTask(sender, flow);
     if (message?.type === 'apw-confirm-store' && flow && applePage(sender.url) &&
         flow.phase === 'guest-clicked' && message.storeNumber === flow.storeNumber &&
         /\/shop\/checkout(?:\/|$)/.test(new URL(sender.url).pathname)) {

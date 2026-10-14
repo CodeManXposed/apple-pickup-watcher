@@ -9,6 +9,7 @@
   const storeNumber = params.get('apw-store');
   const partNumber = (params.get('apw-part') || '').toUpperCase();
   const taskId = params.get('apw-task');
+  const productName = params.get('apw-product');
   const area = Object.fromEntries(['province', 'city', 'district'].map((key) => [key, params.get(`apw-${key}`)]));
   const ORDER_CONFIG_KEY = 'apwOrderConfig';
   const GUEST_TEXT = /^(?:(?:以访客身份|以游客身份)(?:继续|结[账帐]|购买)|(?:继续)?以访客身份结[账帐]|访客结[账帐]|访客继续|continue as (?:a )?guest|guest checkout)$/i;
@@ -253,6 +254,19 @@
     return prices.size === 1 ? prices.values().next().value : null;
   }
 
+  function reviewItemMatches(flow) {
+    if (!flow.productName || typeof flow.productName !== 'string') return false;
+    const normalize = (value) => value.normalize('NFKC').replace(/\s+/g, '').toLocaleLowerCase();
+    const expected = normalize(flow.productName);
+    const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6'))
+      .filter((node) => shown(node) && normalize(node.textContent || '') === expected);
+    if (headings.length !== 1) return false;
+    const item = headings[0].closest('li');
+    if (!item || item.parentElement?.children.length !== 1) return false;
+    const quantities = Array.from((item.textContent || '').matchAll(/(?:数量|Quantity)\s*[:：]?\s*(\d+)/gi));
+    return quantities.length === 1 && quantities[0][1] === '1';
+  }
+
   async function placeOrderIfAuthorized(button, flow) {
     const { [ORDER_CONFIG_KEY]: config } = await chrome.storage.local.get(ORDER_CONFIG_KEY);
     if (!config?.enabled) {
@@ -280,7 +294,15 @@
       notice(`订单总额 ¥${(cents / 100).toFixed(2)} 超过 ¥${maxCny} 上限，已停止自动下单。`, true);
       return;
     }
+    if (!reviewItemMatches(flow)) {
+      notice('无法确认最终订单仍仅含一件目标商品，已停止自动下单。请手动核对。', true);
+      return;
+    }
     if (clickedSteps.has('place-order') || !visible(button)) return;
+    if (!await chrome.runtime.sendMessage({ type: 'apw-active-task' })) {
+      notice('桌面应用未确认这仍是当前监控任务，已停止自动下单。请手动核对。', true);
+      return;
+    }
     const updated = await chrome.runtime.sendMessage({ type: 'apw-checkout-step', phase: 'order-submitted' });
     if (!updated || !visible(button)) {
       notice('无法锁定本次自动下单任务，请手动核对。', true);
@@ -388,8 +410,12 @@
       }
     }
     if (markedBag && !begun) {
-      const started = await chrome.runtime.sendMessage({ type: 'apw-begin-checkout', storeNumber, partNumber, taskId, area });
-      if (!started) { done = true; return; }
+      const started = await chrome.runtime.sendMessage({ type: 'apw-begin-checkout', storeNumber, partNumber, taskId, productName, area });
+      if (!started) {
+        done = true;
+        notice('无法确认当前监控任务或连接桌面应用，已停止自动结账。', true);
+        return;
+      }
       begun = true;
       reportStage('bag');
       history.replaceState(history.state, '', location.pathname + location.search);

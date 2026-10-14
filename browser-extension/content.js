@@ -13,11 +13,12 @@
     const part = (params.get('apw-auto-add') || '').toUpperCase();
     const storeNumber = (params.get('apw-store') || '').toUpperCase();
     const taskId = params.get('apw-task');
+    const productName = params.get('apw-product');
     const province = params.get('apw-province');
     const city = params.get('apw-city');
     const district = params.get('apw-district');
     if (!PART.test(part) || !STORE.test(storeNumber) || (taskId && !TASK.test(taskId))) return;
-    intent = { part, storeNumber, taskId, province, city, district, phase: 'choosing', startedAt: Date.now() };
+    intent = { part, storeNumber, taskId, productName, province, city, district, phase: 'choosing', startedAt: Date.now() };
     sessionStorage.setItem(KEY, JSON.stringify(intent));
     // 返回商品页或刷新时不能再次启动一次加车。
     history.replaceState(history.state, '', location.pathname + location.search);
@@ -64,6 +65,7 @@
       'apw-checkout': '1', 'apw-store': intent.storeNumber, 'apw-part': intent.part,
     });
     if (intent.taskId) checkout.set('apw-task', intent.taskId);
+    if (intent.productName) checkout.set('apw-product', intent.productName);
     for (const key of ['province', 'city', 'district']) {
       if (intent[key]) checkout.set(`apw-${key}`, intent[key]);
     }

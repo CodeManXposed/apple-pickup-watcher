@@ -17,7 +17,7 @@ function button(label, group = null) {
   };
 }
 
-async function page({ pathname, hash = '', official = [], candidates = [], phase = null, selectors = {}, profileReady = false, flowProps = {}, orderConfig = null, hostname = 'secure11.www.apple.com.cn' }) {
+async function page({ pathname, hash = '', official = [], candidates = [], phase = null, selectors = {}, profileReady = false, flowProps = {}, orderConfig = null, hostname = 'secure11.www.apple.com.cn', activeTask = true }) {
   const location = { pathname, search: '', hash, hostname, origin: 'https://www.apple.com.cn' };
   const history = { state: null, replaceState(_state, _title, url) { this.url = url; } };
   const notices = new Map();
@@ -30,6 +30,7 @@ async function page({ pathname, hash = '', official = [], candidates = [], phase
     runtime: {
       async sendMessage(message) {
         sent.push(message);
+        if (message.type === 'apw-active-task') return activeTask;
         if (message.type === 'apw-begin-checkout') currentPhase = 'bag';
         if (message.type === 'apw-checkout-step') currentPhase = message.phase;
         if (message.type === 'apw-confirm-store') currentFlow.pickupConfirmed = true;
@@ -94,7 +95,8 @@ test('bag binds pickup area to the checkout task', async () => {
     closest() { return { querySelector() { return { value: '1' }; } }; } };
   const params = new URLSearchParams({
     'apw-checkout': '1', 'apw-store': 'R683', 'apw-part': 'MJYE4CH/A',
-    'apw-task': taskId, 'apw-province': '上海', 'apw-city': '上海', 'apw-district': '普陀区',
+    'apw-task': taskId, 'apw-product': 'iPhone 18 Pro 256GB 黑色',
+    'apw-province': '上海', 'apw-city': '上海', 'apw-district': '普陀区',
   });
   const result = await page({
     pathname: '/shop/bag', hash: `#${params}`, official: [checkout],
@@ -103,6 +105,7 @@ test('bag binds pickup area to the checkout task', async () => {
   const started = result.sent.find((message) => message.type === 'apw-begin-checkout');
   assert.equal(started.area.province, '上海');
   assert.equal(started.area.district, '普陀区');
+  assert.equal(started.productName, 'iPhone 18 Pro 256GB 黑色');
 });
 
 test('bag without the exact target SKU does not enter checkout', async () => {
@@ -391,20 +394,72 @@ function totalLabel(amount) {
   };
 }
 
+function reviewProduct(name = 'iPhone 18 Pro 256GB 黑色', quantity = 1, extraItem = false) {
+  const item = { textContent: `${name} 数量：${quantity} RMB 9,999` };
+  item.parentElement = { children: extraItem ? [item, {}] : [item] };
+  return {
+    textContent: name,
+    getClientRects() { return [1]; },
+    closest(selector) { return selector === 'li' ? item : null; },
+  };
+}
+
 test('auto order clicks only when the confirmed Apple total is within the configured cap', async () => {
   const order = button('现在下订单');
   const result = await page({
     pathname: '/shop/checkout', phase: 'guest-clicked',
-    flowProps: { pickupConfirmed: true, alipayConfirmed: true },
+    flowProps: { pickupConfirmed: true, alipayConfirmed: true, productName: 'iPhone 18 Pro 256GB 黑色' },
     orderConfig: { enabled: true, maxCny: 9999 },
     selectors: {
       '[data-autom="continue-button-placeOrder"]': [order],
       'span, strong, b, dt, th, p, div': [totalLabel('9,999.00')],
+      'h1, h2, h3, h4, h5, h6': [reviewProduct()],
       '[role="dialog"]': [],
     },
   });
   assert.equal(order.clicks, 1);
   assert.equal(result.phase, 'order-submitted');
+});
+
+test('auto order refuses changed product, extra item, or quantity two on Apple review', async () => {
+  for (const product of [
+    reviewProduct('iPhone 18 Pro 256GB 白色'),
+    reviewProduct('iPhone 18 Pro 256GB 黑色', 2),
+    reviewProduct('iPhone 18 Pro 256GB 黑色', 1, true),
+  ]) {
+    const order = button('立即下单');
+    const result = await page({
+      pathname: '/shop/checkout', phase: 'guest-clicked',
+      flowProps: { pickupConfirmed: true, alipayConfirmed: true, productName: 'iPhone 18 Pro 256GB 黑色' },
+      orderConfig: { enabled: true, maxCny: 9999 },
+      selectors: {
+        '[data-autom="continue-button-placeOrder"]': [order],
+        'span, strong, b, dt, th, p, div': [totalLabel('9,999.00')],
+        'h1, h2, h3, h4, h5, h6': [product],
+        '[role="dialog"]': [],
+      },
+    });
+    assert.equal(order.clicks, 0);
+    assert.equal(result.phase, 'guest-clicked');
+  }
+});
+
+test('auto order refuses a task replaced in the desktop app', async () => {
+  const order = button('立即下单');
+  const result = await page({
+    pathname: '/shop/checkout', phase: 'guest-clicked', activeTask: false,
+    flowProps: { pickupConfirmed: true, alipayConfirmed: true, productName: 'iPhone 18 Pro 256GB 黑色' },
+    orderConfig: { enabled: true, maxCny: 9999 },
+    selectors: {
+      '[data-autom="continue-button-placeOrder"]': [order],
+      'span, strong, b, dt, th, p, div': [totalLabel('9,999.00')],
+      'h1, h2, h3, h4, h5, h6': [reviewProduct()],
+      '[role="dialog"]': [],
+    },
+  });
+  assert.equal(order.clicks, 0);
+  assert.equal(result.phase, 'guest-clicked');
+  assert.ok(result.sent.some((message) => message.type === 'apw-active-task'));
 });
 
 test('auto order stops above the cap or when total or checkout confirmations are uncertain', async () => {

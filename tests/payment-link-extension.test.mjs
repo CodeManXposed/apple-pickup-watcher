@@ -10,7 +10,7 @@ const apple = 'https://www.apple.com.cn/shop/bag';
 const alipay = 'https://excashier.alipay.com/payment.htm?order=123';
 const taskId = 'b'.repeat(32);
 
-function background() {
+function background({ taskActive = true } = {}) {
   const session = new Map();
   const local = new Map([['apwBridgeToken', 'a'.repeat(32)]]);
   const requests = [];
@@ -37,6 +37,7 @@ function background() {
     chrome, URL, Date, AbortSignal,
     async fetch(url, options) {
       requests.push({ url, options });
+      if (url.endsWith('/task-check')) return { ok: taskActive };
       return { ok: true };
     },
   });
@@ -70,6 +71,16 @@ test('only an active Apple guest checkout forwards a payment link', async () => 
   assert.equal(JSON.parse(paymentRequests[0].options.body).partNumber, 'MJYE4CH/A');
   assert.equal(JSON.parse(paymentRequests[0].options.body).taskId, taskId);
   assert.equal(paymentRequests[0].options.headers.Authorization, `Bearer ${'a'.repeat(32)}`);
+});
+
+test('checkout cannot begin when the desktop task is stale or pairing is missing', async () => {
+  const stale = background({ taskActive: false });
+  assert.equal(await stale.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A', taskId }, apple), null);
+  assert.equal(await stale.send({ type: 'apw-get-checkout' }, apple), null);
+  const unpaired = background();
+  unpaired.local.delete('apwBridgeToken');
+  assert.equal(await unpaired.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A', taskId }, apple), null);
+  assert.equal(unpaired.requests.length, 0);
 });
 
 test('rejects unrelated or forged cashier URLs and missing pairing code', async () => {

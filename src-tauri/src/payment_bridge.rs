@@ -63,6 +63,14 @@ struct IncomingStatus {
     stage: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IncomingTask {
+    part_number: String,
+    store_number: String,
+    task_id: String,
+}
+
 pub struct PaymentBridge {
     token: Option<String>,
     latest: RwLock<Option<(PaymentLink, Option<String>)>>,
@@ -97,6 +105,15 @@ impl PaymentBridge {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    fn is_active_task(&self, task: &IncomingTask) -> bool {
+        self.status().is_some_and(|status| {
+            status.part_number == task.part_number
+                && status.store_number == task.store_number
+                && status.task_id == task.task_id
+                && stage_rank(&status.stage).is_some_and(|rank| (1..10).contains(&rank))
+        })
     }
 
     pub fn start_task(&self, part_number: &str, store_number: &str) -> BotStatus {
@@ -400,14 +417,17 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
     };
     if matches!(
         request_line,
-        "OPTIONS /payment-link" | "OPTIONS /task-status" | "OPTIONS /pairing-check"
+        "OPTIONS /payment-link"
+            | "OPTIONS /task-status"
+            | "OPTIONS /task-check"
+            | "OPTIONS /pairing-check"
     ) {
         respond(&mut socket, 204, origin, "").await;
         return;
     }
     if !matches!(
         request_line,
-        "POST /payment-link" | "POST /task-status" | "POST /pairing-check"
+        "POST /payment-link" | "POST /task-status" | "POST /task-check" | "POST /pairing-check"
     ) {
         respond(&mut socket, 404, origin, "{}").await;
         return;
@@ -423,6 +443,28 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
     }
     if request_line == "POST /pairing-check" {
         respond(&mut socket, 200, origin, "{\"ok\":true}").await;
+        return;
+    }
+    if request_line == "POST /task-check" {
+        let Ok(incoming) = serde_json::from_slice::<IncomingTask>(&body) else {
+            respond(&mut socket, 400, origin, "{}").await;
+            return;
+        };
+        if !valid_task_identity(&incoming) {
+            respond(&mut socket, 400, origin, "{}").await;
+            return;
+        }
+        respond(
+            &mut socket,
+            if bridge.is_active_task(&incoming) {
+                200
+            } else {
+                409
+            },
+            origin,
+            "{}",
+        )
+        .await;
         return;
     }
     if request_line == "POST /task-status" {
@@ -531,13 +573,21 @@ fn valid_task_status(status: &IncomingStatus) -> bool {
             | "review"
             | "orderSubmitted"
             | "failed"
-    ) && valid_task_id(&status.task_id)
-        && (2..=10).contains(&status.store_number.len())
-        && status
+    ) && valid_task_identity(&IncomingTask {
+        part_number: status.part_number.clone(),
+        store_number: status.store_number.clone(),
+        task_id: status.task_id.clone(),
+    })
+}
+
+fn valid_task_identity(task: &IncomingTask) -> bool {
+    valid_task_id(&task.task_id)
+        && (2..=10).contains(&task.store_number.len())
+        && task
             .store_number
             .bytes()
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-        && status
+        && task
             .part_number
             .split_once('/')
             .is_some_and(|(part, suffix)| {
@@ -605,8 +655,8 @@ async fn send_discord(app: AppHandle, link: PaymentLink) {
 #[cfg(test)]
 mod tests {
     use super::{
-        IncomingLink, IncomingStatus, PaymentBridge, PaymentLink, link_matches_task, read_request,
-        respond, valid_alipay_url, valid_origin, valid_task_status,
+        IncomingLink, IncomingStatus, IncomingTask, PaymentBridge, PaymentLink, link_matches_task,
+        read_request, respond, valid_alipay_url, valid_origin, valid_task_status,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -671,6 +721,38 @@ mod tests {
             store_number: "R683".into(),
             task_id,
             stage: "profile".into(),
+        }));
+    }
+
+    #[test]
+    fn active_task_check_rejects_replaced_failed_and_submitted_tasks() {
+        let bridge = PaymentBridge::disabled();
+        let first_id = bridge.start_task("MJYE4CH/A", "R683").task_id;
+        let first = IncomingTask {
+            part_number: "MJYE4CH/A".into(),
+            store_number: "R683".into(),
+            task_id: first_id.clone(),
+        };
+        assert!(!bridge.is_active_task(&first));
+        bridge.advance_task("launched", "MJYE4CH/A", "R683", &first_id);
+        assert!(bridge.is_active_task(&first));
+        let second_id = bridge.start_task("MJYE4CH/A", "R683").task_id;
+        assert!(!bridge.is_active_task(&first));
+        let second = IncomingTask {
+            task_id: second_id.clone(),
+            ..first
+        };
+        bridge.advance_task("launched", "MJYE4CH/A", "R683", &second_id);
+        bridge.advance_task("review", "MJYE4CH/A", "R683", &second_id);
+        assert!(bridge.is_active_task(&second));
+        bridge.advance_task("orderSubmitted", "MJYE4CH/A", "R683", &second_id);
+        assert!(!bridge.is_active_task(&second));
+        let third_id = bridge.start_task("MJYE4CH/A", "R683").task_id;
+        bridge.advance_task("launched", "MJYE4CH/A", "R683", &third_id);
+        bridge.fail_if_stage(&third_id, "launched");
+        assert!(!bridge.is_active_task(&IncomingTask {
+            task_id: third_id,
+            ..second
         }));
     }
 

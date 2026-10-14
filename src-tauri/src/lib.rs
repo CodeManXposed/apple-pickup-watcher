@@ -505,6 +505,17 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
                         let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
                         let mut task_url = reqwest::Url::parse(&format!("{url}&apw-task={task_id}"))
                             .map_err(|err| err.to_string())?;
+                        let product_param = reqwest::Url::parse_with_params(
+                            "https://localhost/",
+                            &[("apw-product", target.product_name.as_str())],
+                        )
+                        .map_err(|err| err.to_string())?;
+                        let fragment = format!(
+                            "{}&{}",
+                            task_url.fragment().unwrap_or_default(),
+                            product_param.query().unwrap_or_default()
+                        );
+                        task_url.set_fragment(Some(&fragment));
                         if let Some((province, city, district)) = &checkout_area {
                             let fragment = format!(
                                 "{}&apw-province={province}&apw-city={city}&apw-district={district}",
