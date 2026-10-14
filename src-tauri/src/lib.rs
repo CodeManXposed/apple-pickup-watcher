@@ -272,6 +272,7 @@ async fn set_interval(state: tauri::State<'_, AppState>, seconds: u64) -> Result
 async fn start_watching(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
     if state.settings_snapshot().auto_add_to_bag {
         browser_bot::ready(&app)?;
+        app.state::<PaymentBridge>().pairing_code()?;
     }
     state.watcher.start().await;
     Ok(())

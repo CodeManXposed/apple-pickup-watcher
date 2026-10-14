@@ -65,7 +65,7 @@ struct IncomingStatus {
 
 pub struct PaymentBridge {
     token: Option<String>,
-    latest: RwLock<Option<PaymentLink>>,
+    latest: RwLock<Option<(PaymentLink, Option<String>)>>,
     status: RwLock<Option<BotStatus>>,
 }
 
@@ -88,7 +88,8 @@ impl PaymentBridge {
         self.latest
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .as_ref()
+            .map(|(link, _)| link.clone())
     }
 
     pub fn status(&self) -> Option<BotStatus> {
@@ -138,12 +139,15 @@ impl PaymentBridge {
         Some(next)
     }
 
-    fn record(&self, link: PaymentLink) -> bool {
+    fn record(&self, link: PaymentLink, task_id: Option<&str>) -> bool {
         let mut current = self.latest.write().unwrap_or_else(|e| e.into_inner());
-        if current.as_ref().is_some_and(|old| old.url == link.url) {
+        if current
+            .as_ref()
+            .is_some_and(|(old, old_task)| old.url == link.url && old_task.as_deref() == task_id)
+        {
             return false;
         }
-        *current = Some(link);
+        *current = Some((link, task_id.map(str::to_owned)));
         true
     }
 }
@@ -439,7 +443,7 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
             .unwrap_or_default()
             .as_secs(),
     };
-    let fresh = bridge.record(link.clone());
+    let fresh = bridge.record(link.clone(), incoming.task_id.as_deref());
     let advanced = bridge.status().and_then(|status| {
         bridge.advance_task(
             "paymentLink",
@@ -526,8 +530,8 @@ async fn send_discord(app: AppHandle, link: PaymentLink) {
 #[cfg(test)]
 mod tests {
     use super::{
-        IncomingLink, IncomingStatus, PaymentBridge, link_matches_task, read_request, respond,
-        valid_alipay_url, valid_origin, valid_task_status,
+        IncomingLink, IncomingStatus, PaymentBridge, PaymentLink, link_matches_task, read_request,
+        respond, valid_alipay_url, valid_origin, valid_task_status,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -611,6 +615,19 @@ mod tests {
                 .is_none()
         );
         assert!(!link_matches_task(&link, bridge.status().as_ref()));
+    }
+
+    #[test]
+    fn same_cashier_url_is_new_for_a_new_task() {
+        let bridge = PaymentBridge::disabled();
+        let link = PaymentLink {
+            url: "https://excashier.alipay.com/payment.htm".into(),
+            kind: "cashier".into(),
+            received_at: 1,
+        };
+        assert!(bridge.record(link.clone(), Some("first")));
+        assert!(!bridge.record(link.clone(), Some("first")));
+        assert!(bridge.record(link, Some("second")));
     }
 
     #[tokio::test]

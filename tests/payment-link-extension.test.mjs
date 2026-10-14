@@ -61,7 +61,9 @@ test('only an active Apple guest checkout forwards a payment link', async () => 
   assert.equal((await app.send(request, alipay, 2))?.reason, 'no-active-checkout');
   assert.equal((await app.send(request, alipay))?.reason, 'no-active-checkout');
   await app.send({ type: 'apw-checkout-step', phase: 'order-submitted' }, 'https://secure11.www.apple.com.cn/shop/checkout');
+  assert.equal(app.requests.filter(({ url }) => url.endsWith('/task-status')).length, 0);
   assert.equal((await app.send(request, alipay))?.ok, true);
+  assert.equal(app.requests.filter(({ url }) => url.endsWith('/task-status')).length, 1);
   const paymentRequests = app.requests.filter(({ url }) => url.endsWith('/payment-link'));
   assert.equal(paymentRequests.length, 1);
   assert.equal(JSON.parse(paymentRequests[0].options.body).url, alipay);

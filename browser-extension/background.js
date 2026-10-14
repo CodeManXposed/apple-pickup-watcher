@@ -134,7 +134,6 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       if (next !== message.phase) return null;
       const updated = { ...flow, phase: next };
       await chrome.storage.session.set({ [key]: updated });
-      if (next === 'order-submitted') await forwardStage('orderSubmitted', sender, updated);
       return updated;
     }
     if (message?.type === 'apw-payment-link') {
