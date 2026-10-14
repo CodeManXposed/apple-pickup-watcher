@@ -106,7 +106,7 @@ export interface PaymentLink {
 export interface BotStatus {
   partNumber: string;
   storeNumber: string;
-  stage: "starting" | "launched" | "bag" | "checkout" | "guest" | "profile" |
+  stage: "starting" | "launched" | "bag" | "checkout" | "guest" | "privacy" | "profile" | "profileAction" |
     "payment" | "review" | "orderSubmitted" | "paymentLink" | "failed";
   updatedAt: number;
 }

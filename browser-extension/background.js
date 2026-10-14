@@ -88,7 +88,7 @@ async function forwardStage(stage, sender, flow) {
   const allowed = {
     bag: ['bag'],
     'bag-clicked': ['checkout'],
-    'guest-clicked': ['guest', 'profile', 'payment', 'review'],
+    'guest-clicked': ['guest', 'privacy', 'profile', 'profileAction', 'payment', 'review'],
     'order-submitted': ['orderSubmitted'],
   };
   if (!allowed[flow.phase]?.includes(stage)) return { ok: false, reason: 'invalid-stage' };

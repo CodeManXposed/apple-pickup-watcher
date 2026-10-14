@@ -96,10 +96,12 @@ test('forwards only stages from the active Apple checkout with its target', asyn
   await app.send({ type: 'apw-checkout-step', phase: 'bag-clicked' }, apple);
   assert.equal((await app.send(stage('checkout'), apple))?.ok, true);
   await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
+  assert.equal((await app.send(stage('privacy'), 'https://secure11.www.apple.com.cn/shop/checkout'))?.ok, true);
   assert.equal((await app.send(stage('profile'), 'https://secure11.www.apple.com.cn/shop/checkout'))?.ok, true);
+  assert.equal((await app.send(stage('profileAction'), 'https://secure11.www.apple.com.cn/shop/checkout'))?.ok, true);
   const statuses = app.requests.filter(({ url }) => url.endsWith('/task-status'))
     .map(({ options }) => JSON.parse(options.body));
-  assert.deepEqual(statuses.map(({ stage }) => stage), ['bag', 'checkout', 'profile']);
+  assert.deepEqual(statuses.map(({ stage }) => stage), ['bag', 'checkout', 'privacy', 'profile', 'profileAction']);
   assert.ok(statuses.every(({ partNumber, storeNumber }) => partNumber === 'MJYE4CH/A' && storeNumber === 'R683'));
   assert.ok(statuses.every((status) => status.taskId === taskId));
 });

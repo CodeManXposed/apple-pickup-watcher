@@ -295,9 +295,10 @@ test('contact step waits for profile fill and required fields before continuing'
 test('pickup contact waits for Apple phone verification', async () => {
   const continueButton = button('继续');
   const verify = button('验证');
-  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', profileReady: true,
+  const result = await page({ pathname: '/shop/checkout', phase: 'guest-clicked', profileReady: true,
     candidates: [verify],
     selectors: {
+      '[data-autom="fulfillment-continue-button"]': [],
       '.rs-pickup-button button': [continueButton],
       '[role="dialog"]': [],
       'input[required], textarea[required], select[required], input[aria-required="true"], textarea[aria-required="true"], select[aria-required="true"]': [],
@@ -305,6 +306,7 @@ test('pickup contact waits for Apple phone verification', async () => {
     },
   });
   assert.equal(continueButton.clicks, 0);
+  assert.ok(result.sent.some((message) => message.type === 'apw-task-stage' && message.stage === 'profileAction'));
 });
 
 test('hidden buttons from earlier checkout steps do not block the visible contact step', async () => {
@@ -336,8 +338,9 @@ test('privacy consent and a missing monitored store stop automatic checkout', as
     'input[type="radio"].form-selector-input': [],
     '[role="dialog"]': [privacy],
   };
-  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
+  const consent = await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
   assert.equal(fulfillment.clicks, 0);
+  assert.ok(consent.sent.some((message) => message.type === 'apw-task-stage' && message.stage === 'privacy'));
 
   selectors['[role="dialog"]'] = [];
   await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });

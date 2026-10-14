@@ -232,12 +232,14 @@ fn stage_rank(stage: &str) -> Option<u8> {
         "bag" => 2,
         "checkout" => 3,
         "guest" => 4,
-        "profile" => 5,
-        "payment" => 6,
-        "review" => 7,
-        "orderSubmitted" => 8,
-        "paymentLink" => 9,
-        "failed" => 10,
+        "privacy" => 5,
+        "profile" => 6,
+        "profileAction" => 7,
+        "payment" => 8,
+        "review" => 9,
+        "orderSubmitted" => 10,
+        "paymentLink" => 11,
+        "failed" => 12,
         _ => return None,
     })
 }
@@ -453,6 +455,22 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
         };
         respond(&mut socket, 200, origin, "{\"ok\":true}").await;
         let _ = app.emit(STATUS_CHANNEL, status);
+        if matches!(incoming.stage.as_str(), "privacy" | "profileAction") {
+            use tauri_plugin_notification::NotificationExt;
+
+            let message = if incoming.stage == "privacy" {
+                "请在独立浏览器阅读并处理 Apple 隐私同意书"
+            } else {
+                "请在独立浏览器补全取货资料及所需身份验证"
+            };
+            let _ = app.emit(NOTICE_CHANNEL, message);
+            let _ = app
+                .notification()
+                .builder()
+                .title("Apple 结账需要操作")
+                .body(message)
+                .show();
+        }
         if incoming.stage == "failed" {
             let _ = app.emit(
                 NOTICE_CHANNEL,
@@ -506,7 +524,9 @@ fn valid_task_status(status: &IncomingStatus) -> bool {
         "bag"
             | "checkout"
             | "guest"
+            | "privacy"
             | "profile"
+            | "profileAction"
             | "payment"
             | "review"
             | "orderSubmitted"
@@ -669,6 +689,36 @@ mod tests {
         assert_eq!(
             bridge.fail_if_stage(&new_id, "launched").unwrap().stage,
             "failed"
+        );
+    }
+
+    #[test]
+    fn manual_checkout_actions_advance_before_payment() {
+        let bridge = PaymentBridge::disabled();
+        let task_id = bridge.start_task("MJYE4CH/A", "R683").task_id;
+        for stage in [
+            "launched",
+            "bag",
+            "checkout",
+            "guest",
+            "privacy",
+            "profile",
+            "profileAction",
+            "payment",
+            "review",
+        ] {
+            assert_eq!(
+                bridge
+                    .advance_task(stage, "MJYE4CH/A", "R683", &task_id)
+                    .unwrap()
+                    .stage,
+                stage
+            );
+        }
+        assert!(
+            bridge
+                .advance_task("privacy", "MJYE4CH/A", "R683", &task_id)
+                .is_none()
         );
     }
 

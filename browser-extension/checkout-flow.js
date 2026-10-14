@@ -103,12 +103,14 @@
       window.dispatchEvent(new Event('apw-request-profile-fill'));
     }
     if (document.documentElement.getAttribute('data-apw-profile-fill-ready') !== '1') {
+      reportStage('profileAction');
       notice('请先在扩展中保存并启用结账资料，或在 Apple 页面手动继续。');
       return false;
     }
     const verifyPhone = Array.from(document.querySelectorAll('button, [role="button"]')).find((element) =>
       visible(element) && /^(?:验证|verify)$/i.test((element.textContent || '').trim()));
     if (verifyPhone) {
+      reportStage('profileAction');
       notice('请在 Apple 页面完成联系人手机号码验证。');
       return false;
     }
@@ -122,7 +124,10 @@
       }
       return !String(field.value || '').trim();
     });
-    if (missing) notice('结账资料仍有必填项未完成，请在 Apple 页面补全。');
+    if (missing) {
+      reportStage('profileAction');
+      notice('结账资料仍有必填项未完成，请在 Apple 页面补全。');
+    }
     return !missing;
   }
 
@@ -292,6 +297,7 @@
     const privacy = Array.from(document.querySelectorAll('[role="dialog"]')).find((dialog) =>
       visible(dialog) && /隐私政策|数据隐私|privacy policy/i.test(dialog.textContent || ''));
     if (privacy) {
+      reportStage('privacy');
       notice('请先在 Apple 页面自行阅读并处理隐私同意书。');
       return;
     }
