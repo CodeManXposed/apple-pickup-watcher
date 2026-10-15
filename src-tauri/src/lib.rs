@@ -259,6 +259,7 @@ async fn save_settings(
     next.normalize();
     state.catalog.attach_companions(&mut next.targets);
     state.catalog.attach_locations(&mut next.targets);
+    validate_api_task_urls(&next)?;
 
     // 无论监控是否已运行，开启自动加车前都做预检。
     // 预检放在任何引擎或配置改动之前，失败时保持旧设置。
@@ -280,6 +281,65 @@ async fn save_settings(
 
     state.put_settings(next.clone())?;
     Ok(next)
+}
+
+fn validate_api_task_urls(settings: &Settings) -> Result<(), String> {
+    for target in &settings.targets {
+        let Some(plan) = release_task::plan_for(settings, target) else {
+            continue;
+        };
+        if plan.add_method != AddMethod::Api {
+            continue;
+        }
+        let region = region_by_locale(&target.locale)
+            .ok_or_else(|| format!("API 任务 {} 的地区无效", target.part_number))?;
+        direct_cart::product_url(region, target, Some(plan))
+            .map_err(|err| format!("API 任务 {}：{err}", target.part_number))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod api_task_url_tests {
+    use super::validate_api_task_urls;
+    use apw_core::config::{AddMethod, Settings, TaskMode, TaskPlan};
+    use apw_core::model::Target;
+
+    #[test]
+    fn rejects_a_wrong_sku_before_saving_an_api_task() {
+        let target = Target {
+            locale: "zh_CN".into(),
+            store_number: "R683".into(),
+            store_title: "测试门店".into(),
+            part_number: "MJYE4CH/A".into(),
+            product_name: "测试商品".into(),
+            companion_part: None,
+            pickup_location: None,
+        };
+        let plan = TaskPlan {
+            target_key: target.key().0,
+            mode: TaskMode::Restock,
+            add_method: AddMethod::Api,
+            product_url: Some(
+                "https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro/OTHERCH/A".into(),
+            ),
+            release_at_ms: None,
+            retry_delay_ms: 3_000,
+        };
+        let mut settings = Settings {
+            targets: vec![target],
+            task_plans: vec![plan],
+            ..Settings::default()
+        };
+        assert!(
+            validate_api_task_urls(&settings)
+                .unwrap_err()
+                .contains("SKU")
+        );
+        settings.task_plans[0].product_url =
+            Some("https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro".into());
+        assert!(validate_api_task_urls(&settings).is_ok());
+    }
 }
 
 /// 用界面上的推送地址列表整体替换现有的。
@@ -332,7 +392,9 @@ async fn set_interval(state: tauri::State<'_, AppState>, seconds: u64) -> Result
 
 #[tauri::command]
 async fn start_watching(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    if state.settings_snapshot().auto_add_to_bag {
+    let settings = state.settings_snapshot();
+    if settings.auto_add_to_bag {
+        validate_api_task_urls(&settings)?;
         preflight_checkout(app).await?;
     }
     state.watcher.start().await;
