@@ -114,6 +114,7 @@ function renderApp() {
     taskSwitch: () => control((element) => element?.props?.id === "autoadd"),
     taskMode: (key) => control((element) => element?.props?.id === `task-mode-${key}`),
     taskAddMethod: (key) => control((element) => element?.props?.id === `task-add-method-${key}`),
+    taskSku: (key) => control((element) => element?.props?.id === `task-sku-${key}`),
     taskProductUrl: (key) => control((element) => element?.props?.id === `task-product-url-${key}`),
     taskRelease: (key) => control((element) => element?.props?.id === `task-release-${key}`),
     taskRetry: (key) => control((element) => element?.props?.id === `task-retry-${key}`),
@@ -188,6 +189,9 @@ test("each task saves release time and retry delay independently", async () => {
   app.taskAddMethod(key).onChange({ target: { value: "api" } });
   await new Promise(setImmediate);
   assert.equal(app.saved.at(-1).taskPlans[0].addMethod, "api");
+  assert.equal(app.taskSku(key).value, target.partNumber);
+  assert.equal(app.taskSku(key).readOnly, true);
+  assert.equal(app.taskProductUrl(key).defaultValue, "");
   const productUrl = "https://www.apple.com.cn/shop/pdpAddToBag/MJYE4CH/A";
   app.taskProductUrl(key).onBlur({ target: { value: productUrl } });
   await new Promise(setImmediate);

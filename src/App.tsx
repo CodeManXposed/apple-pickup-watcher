@@ -1321,7 +1321,7 @@ export default function App() {
             <section className="tasks-list bg-card flex min-h-0 flex-col overflow-hidden rounded-xl border shadow-sm shadow-black/10">
               <div className="border-b px-4 py-3">
                 <h2 className="font-semibold">任务队列</h2>
-                <p className="text-muted-foreground text-xs">每条任务独立设置触发时机和加车引擎：发售或补货 × API 直连或 Chrome 模拟。先到的任务占用本轮执行名额。</p>
+                <p className="text-muted-foreground text-xs">每条任务独立设置触发时机和加车方式：发售或补货 × Apple 请求或 Chrome 页面模拟。先到的任务占用本轮执行名额。</p>
               </div>
               <ScrollArea className="min-h-0 flex-1">
                 <div className="grid gap-3 p-3">
@@ -1364,7 +1364,7 @@ export default function App() {
                             </select>
                           </div>
                           <div>
-                            <Label htmlFor={`task-add-method-${key}`} className="text-muted-foreground text-xs">加车引擎</Label>
+                            <Label htmlFor={`task-add-method-${key}`} className="text-muted-foreground text-xs">加车模式</Label>
                             <select
                               id={`task-add-method-${key}`}
                               className="border-input bg-background mt-1 h-9 w-full rounded-md border px-2 text-sm"
@@ -1373,7 +1373,7 @@ export default function App() {
                               onChange={(event) => void onTaskPlanChange(row.target, { addMethod: event.target.value as TaskPlan["addMethod"] })}
                             >
                               <option value="browser">Chrome · 页面模拟</option>
-                              <option value="api">API · HTTP 直连</option>
+                              <option value="api">API · URL / SKU 直连</option>
                             </select>
                           </div>
                           <div>
@@ -1414,21 +1414,27 @@ export default function App() {
                           <p className="text-muted-foreground mt-3 text-xs">Chrome 模式在独立浏览器中操作 Apple 商品页；需要验证时可在该浏览器完成。</p>
                         )}
                         {addMethod === "api" && (
-                          <div className="mt-3">
-                            <Label htmlFor={`task-product-url-${key}`} className="text-muted-foreground text-xs">Apple 商品或机型 URL · 可选，留空按 SKU 解析</Label>
-                            <Input
-                              id={`task-product-url-${key}`}
-                              type="url"
-                              placeholder="https://www.apple.com.cn/shop/buy-iphone/…"
-                              className="mt-1 h-9"
-                              defaultValue={plan?.productUrl ?? ""}
-                              disabled={taskSaving}
-                              onBlur={(event) => {
-                                const value = event.target.value.trim();
-                                if (value !== (plan?.productUrl ?? "")) void onTaskPlanChange(row.target, { productUrl: value || null });
-                              }}
-                            />
-                            <p className="text-muted-foreground mt-1 text-xs">机型页会与本任务 SKU 组合成具体商品页。API 模式直接请求 Apple 网页加车端点；发售时仍在 Chrome 待命，成功后由 Chrome 核对购物袋并继续结账。Apple 验证或拒绝请求时会停止。</p>
+                          <div className="mt-3 grid gap-3 sm:grid-cols-[minmax(140px,0.35fr)_minmax(0,1fr)]">
+                            <div>
+                              <Label htmlFor={`task-sku-${key}`} className="text-muted-foreground text-xs">加车 SKU</Label>
+                              <Input id={`task-sku-${key}`} value={row.target.partNumber} readOnly className="mt-1 h-9 font-mono" />
+                            </div>
+                            <div>
+                              <Label htmlFor={`task-product-url-${key}`} className="text-muted-foreground text-xs">Apple 商品 URL · 可选</Label>
+                              <Input
+                                id={`task-product-url-${key}`}
+                                type="url"
+                                placeholder="留空时按左侧 SKU 解析商品页"
+                                className="mt-1 h-9"
+                                defaultValue={plan?.productUrl ?? ""}
+                                disabled={taskSaving}
+                                onBlur={(event) => {
+                                  const value = event.target.value.trim();
+                                  if (value !== (plan?.productUrl ?? "")) void onTaskPlanChange(row.target, { productUrl: value || null });
+                                }}
+                              />
+                            </div>
+                            <p className="text-muted-foreground text-xs sm:col-span-2">留空时按 SKU 请求 Apple 商品页；填写同地区的商品或机型 URL 时，会校验链接并绑定到任务 SKU，再请求 Apple 网页加车端点。发售时仍在独立 Chrome 等待放行，直连加车成功后由 Chrome 核对购物袋并继续结账。</p>
                           </div>
                         )}
                         <p className="text-muted-foreground mt-3 text-xs" role="status">{taskLabel}</p>
