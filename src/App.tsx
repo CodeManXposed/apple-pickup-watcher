@@ -120,6 +120,14 @@ const BOT_STAGE_LABEL: Record<BotStatus["stage"], string> = {
   failed: "自动结账任务失败，请查看日志",
 };
 
+function botStageLabel(status: BotStatus): string {
+  if (status.automationActive === false &&
+      !["orderSubmitted", "paymentLink", "failed"].includes(status.stage)) {
+    return "上次任务进度已恢复；自动操作已暂停，请在独立浏览器核对";
+  }
+  return BOT_STAGE_LABEL[status.stage];
+}
+
 function StatusBadge({ availability }: { availability: Availability }) {
   const { label, tone, detail } = describeAvailability(availability);
   const badge = (
@@ -1327,7 +1335,7 @@ export default function App() {
                     const current = ui.botStatus?.partNumber === row.target.partNumber &&
                       ui.botStatus.storeNumber === row.target.storeNumber;
                     const taskLabel = current && ui.botStatus
-                      ? BOT_STAGE_LABEL[ui.botStatus.stage]
+                      ? botStageLabel(ui.botStatus)
                       : !ui.settings.autoAddToBag ? "自动任务未启用"
                         : mode === "release" ? !plan?.releaseAtMs ? "请填写开售时间"
                           : plan.releaseAtMs + 4 * 60 * 60 * 1000 < Date.now() ? "本次发售窗口已过"
@@ -1432,7 +1440,7 @@ export default function App() {
         {ui.botStatus && (
           <section className="bg-card shrink-0 rounded-xl border p-4 shadow-xs" aria-live="polite">
             <h2 className="font-semibold">最近自动结账任务</h2>
-            <p className="text-sm">{BOT_STAGE_LABEL[ui.botStatus.stage]}</p>
+            <p className="text-sm">{botStageLabel(ui.botStatus)}</p>
             <p className="text-muted-foreground text-xs">
               {ui.botStatus.partNumber} · 门店 {ui.botStatus.storeNumber} · {formatTime(ui.botStatus.updatedAt * 1000)}
             </p>

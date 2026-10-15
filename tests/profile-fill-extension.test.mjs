@@ -31,7 +31,7 @@ function section(className) {
   };
 }
 
-async function run(fields, saved, pathname = '/shop/checkout') {
+async function run(fields, saved, pathname = '/shop/checkout', activeTask = true) {
   let changed;
   let observer;
   const listeners = new Map();
@@ -46,6 +46,7 @@ async function run(fields, saved, pathname = '/shop/checkout') {
     set(value) { this.value = value; },
   });
   const chrome = {
+    runtime: { async sendMessage(message) { return message.type === 'apw-active-task' && activeTask; } },
     storage: {
       local: { async get() { return { apwCheckoutProfile: saved }; } },
       onChanged: { addListener(fn) { changed = fn; } },
@@ -61,7 +62,7 @@ async function run(fields, saved, pathname = '/shop/checkout') {
     setTimeout(callback) { callback(); },
   });
   await new Promise(setImmediate);
-  return { changed, observer, attributes, requestFill() { listeners.get('apw-request-profile-fill')?.(); } };
+  return { changed, observer, attributes, requestFill() { return listeners.get('apw-request-profile-fill')?.(); } };
 }
 
 const profile = {
@@ -104,11 +105,22 @@ test('only runs in checkout, respects disable switch, and fills later form steps
   const later = input({ name: 'postalCode', parent: delivery });
   fields.push(later);
   runtime.observer();
+  await new Promise(setImmediate);
   assert.equal(later.value, '100000');
   const latest = input({ name: 'lastName', parent: delivery });
   fields.push(latest);
-  runtime.requestFill();
+  await runtime.requestFill();
   assert.equal(latest.value, '李');
+});
+
+test('inactive checkout task never inserts saved contact details', async () => {
+  const pickup = section('pickup-contact');
+  const name = input({ name: 'firstName', label: '名', parent: pickup });
+  const runtime = await run([name], profile, '/shop/checkout', false);
+  assert.equal(name.value, '');
+  assert.equal(runtime.attributes.get('data-apw-profile-fill-ready'), undefined);
+  await runtime.requestFill();
+  assert.equal(name.value, '');
 });
 
 test('selects only one exact delivery option and preserves existing or ambiguous choices', async () => {

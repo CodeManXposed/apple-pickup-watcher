@@ -24,7 +24,18 @@
   ];
   let profile = null;
   let scheduled = false;
+  let activeCheck = null;
   const filled = new WeakSet();
+
+  function currentTask() {
+    if (!activeCheck) {
+      activeCheck = Promise.resolve()
+        .then(() => chrome.runtime.sendMessage({ type: 'apw-active-task' }))
+        .then(Boolean, () => false)
+        .finally(() => { activeCheck = null; });
+    }
+    return activeCheck;
+  }
 
   function readable(value) {
     return String(value || '').replace(/([a-z])([A-Z])/g, '$1 $2');
@@ -105,8 +116,9 @@
     return matches.length === 1 ? matches[0].value : null;
   }
 
-  function fill() {
+  async function fill() {
     if (!profile?.enabled || !CHECKOUT_PATH.test(location.pathname)) return;
+    if (!await currentTask()) return;
     for (const field of document.querySelectorAll('input, textarea, select')) {
       if (!canFill(field)) continue;
       const target = fieldTarget(field);

@@ -62,21 +62,35 @@ pub(crate) fn due_release(settings: &Settings, now: u64) -> Option<(Target, Task
         .min_by_key(|(_, plan)| plan.release_at_ms)
 }
 
-fn stage(app: &AppHandle, task: &Target, task_id: &str, next: &str) {
+fn stage(app: &AppHandle, task: &Target, task_id: &str, next: &str) -> Result<(), String> {
     let bridge = app.state::<PaymentBridge>();
-    if let Some(status) = bridge.advance_task(next, &task.part_number, &task.store_number, task_id)
-    {
-        let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
+    match bridge.advance_task(next, &task.part_number, &task.store_number, task_id)? {
+        Some(status) => {
+            let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
+        }
+        None if bridge.has_progressed(task_id, next) => {}
+        None => return Err("任务已被替换或阶段已变化".into()),
     }
+    Ok(())
 }
 
 fn fail(app: &AppHandle, task_id: &str, reason: &str) {
     let bridge = app.state::<PaymentBridge>();
     for waiting in ["starting", "waitingRelease", "waitingRoom"] {
-        if let Some(status) = bridge.fail_if_stage(task_id, waiting) {
-            let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
-            let _ = app.emit(NOTICE_CHANNEL, reason);
-            break;
+        match bridge.fail_if_stage(task_id, waiting) {
+            Ok(Some(status)) => {
+                let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
+                let _ = app.emit(NOTICE_CHANNEL, reason);
+                break;
+            }
+            Err(err) => {
+                let _ = app.emit(
+                    NOTICE_CHANNEL,
+                    format!("{reason}；保存结账任务状态失败：{err}"),
+                );
+                break;
+            }
+            Ok(None) => {}
         }
     }
 }
@@ -180,7 +194,13 @@ pub(crate) async fn run(
     cancelled: Arc<AtomicBool>,
 ) {
     let bridge = app.state::<PaymentBridge>();
-    let initial = bridge.start_task(&target.part_number, &target.store_number);
+    let initial = match bridge.start_task(&target.part_number, &target.store_number) {
+        Ok(initial) => initial,
+        Err(err) => {
+            let _ = app.emit(NOTICE_CHANNEL, format!("保存发售任务失败：{err}"));
+            return;
+        }
+    };
     let task_id = initial.task_id.clone();
     let _ = app.emit(payment_bridge::EVENT_CHANNEL, Option::<PaymentLink>::None);
     let _ = app.emit(payment_bridge::STATUS_CHANNEL, initial);
@@ -256,7 +276,10 @@ pub(crate) async fn run(
         }
     }
     let Some(tab_id) = tab_id else { return };
-    stage(&app, &target, &task_id, "waitingRelease");
+    if let Err(err) = stage(&app, &target, &task_id, "waitingRelease") {
+        let _ = app.emit(NOTICE_CHANNEL, format!("保存发售任务状态失败：{err}"));
+        return;
+    }
     let _ = app.emit(
         NOTICE_CHANNEL,
         "发售任务已在独立浏览器待命；如遇 Apple 验证，请在原标签页完成。".to_owned(),
@@ -269,7 +292,10 @@ pub(crate) async fn run(
             return;
         }
     }
-    stage(&app, &target, &task_id, "waitingRoom");
+    if let Err(err) = stage(&app, &target, &task_id, "waitingRoom") {
+        let _ = app.emit(NOTICE_CHANNEL, format!("保存发售任务状态失败：{err}"));
+        return;
+    }
     let deadline = at.saturating_add(WAIT_LIMIT_MS);
     let mut errors = 0;
     let mut last_missing_refresh: Option<Instant> = None;
@@ -331,7 +357,13 @@ pub(crate) async fn run(
         };
         match result {
             Ok(true) => {
-                stage(&app, &target, &task_id, "launched");
+                if let Err(err) = stage(&app, &target, &task_id, "launched") {
+                    let _ = app.emit(
+                        NOTICE_CHANNEL,
+                        format!("保存发售任务状态失败：{err}；本轮已停止，避免重复加车"),
+                    );
+                    return;
+                }
                 let watchdog_app = app.clone();
                 let watchdog_message = if plan.add_method == AddMethod::Api {
                     "发售任务直连加车已被确认，但购物袋在 90 秒内未完成核对；请检查独立浏览器。"
@@ -341,9 +373,16 @@ pub(crate) async fn run(
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(Duration::from_secs(90)).await;
                     let bridge = watchdog_app.state::<PaymentBridge>();
-                    if let Some(status) = bridge.fail_if_stage(&task_id, "launched") {
-                        let _ = watchdog_app.emit(payment_bridge::STATUS_CHANNEL, status);
-                        let _ = watchdog_app.emit(NOTICE_CHANNEL, watchdog_message);
+                    match bridge.fail_if_stage(&task_id, "launched") {
+                        Ok(Some(status)) => {
+                            let _ = watchdog_app.emit(payment_bridge::STATUS_CHANNEL, status);
+                            let _ = watchdog_app.emit(NOTICE_CHANNEL, watchdog_message);
+                        }
+                        Err(err) => {
+                            let _ = watchdog_app
+                                .emit(NOTICE_CHANNEL, format!("保存发售任务状态失败：{err}"));
+                        }
+                        Ok(None) => {}
                     }
                 });
                 return;

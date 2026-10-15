@@ -19,6 +19,7 @@
   let orderNoted = false;
   let begun = false;
   const requestedContacts = new WeakSet();
+  const contactRequestedAt = new WeakMap();
   const reportedStages = new Set();
   const reportingStages = new Set();
   const startedAt = Date.now();
@@ -112,12 +113,15 @@
   function contactReady(button) {
     if (!requestedContacts.has(button)) {
       requestedContacts.add(button);
+      contactRequestedAt.set(button, Date.now());
       document.documentElement.setAttribute('data-apw-profile-fill-ready', 'pending');
       window.dispatchEvent(new Event('apw-request-profile-fill'));
     }
     if (document.documentElement.getAttribute('data-apw-profile-fill-ready') !== '1') {
-      reportStage('profileAction');
-      notice('请先在扩展中保存并启用结账资料，或在 Apple 页面手动继续。');
+      if (Date.now() - (contactRequestedAt.get(button) || 0) >= 2500) {
+        reportStage('profileAction');
+        notice('请先在扩展中保存并启用结账资料，或在 Apple 页面手动继续。');
+      }
       return false;
     }
     const verifyPhone = Array.from(document.querySelectorAll('button, [role="button"]')).find((element) =>
@@ -437,6 +441,11 @@
     }
     const flow = await chrome.runtime.sendMessage({ type: 'apw-get-checkout' });
     if (!flow) { done = true; return; }
+    if (flow.phase !== 'order-submitted' &&
+        !await chrome.runtime.sendMessage({ type: 'apw-active-task' })) {
+      notice('桌面应用未确认这是当前运行的任务；自动结账已暂停。请检查任务状态。', true);
+      return;
+    }
     if (isBag && markedBag && flow.phase === 'bag') {
       const button = checkoutButton();
       if (button) {

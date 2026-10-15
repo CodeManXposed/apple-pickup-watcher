@@ -123,6 +123,7 @@ export interface BotStatus {
   stage: "starting" | "waitingRelease" | "waitingRoom" | "launched" | "bag" | "checkout" | "guest" | "privacy" | "profile" | "profileAction" |
     "payment" | "review" | "orderSubmitted" | "paymentLink" | "failed";
   updatedAt: number;
+  automationActive?: boolean;
 }
 
 /** 监控目标的唯一键，与 Rust 侧 Target::key 的构成保持一致。 */

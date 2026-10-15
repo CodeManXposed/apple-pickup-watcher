@@ -195,7 +195,9 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     }
     const flow = await flowFor(tabId);
     if (message?.type === 'apw-get-checkout') return flow;
-    if (message?.type === 'apw-active-task') return flow?.phase === 'guest-clicked' && await activeTask(sender, flow);
+    if (message?.type === 'apw-active-task') {
+      return ['bag', 'bag-clicked', 'guest-clicked'].includes(flow?.phase) && await activeTask(sender, flow);
+    }
     if (message?.type === 'apw-confirm-store' && flow && applePage(sender.url) &&
         flow.phase === 'guest-clicked' && message.storeNumber === flow.storeNumber &&
         /\/shop\/checkout(?:\/|$)/.test(new URL(sender.url).pathname)) {

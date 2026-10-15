@@ -515,6 +515,20 @@ test('auto order refuses a task replaced in the desktop app', async () => {
   assert.ok(result.sent.some((message) => message.type === 'apw-active-task'));
 });
 
+test('a restored but inactive task pauses checkout before selecting payment', async () => {
+  const continueButton = button('继续');
+  const result = await page({
+    pathname: '/shop/checkout', phase: 'guest-clicked', activeTask: false,
+    selectors: {
+      '[data-autom="continue-button-review"]': [continueButton],
+      '[role="dialog"]': [],
+    },
+  });
+  assert.equal(continueButton.clicks, 0);
+  assert.equal(result.phase, 'guest-clicked');
+  assert.ok(result.sent.some((message) => message.type === 'apw-active-task'));
+});
+
 test('auto order stops above the cap or when total or checkout confirmations are uncertain', async () => {
   for (const [amount, flowProps, expected] of [
     ['10,000.00', { pickupConfirmed: true, alipayConfirmed: true }, 'guest-clicked'],

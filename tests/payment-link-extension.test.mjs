@@ -91,6 +91,18 @@ test('checkout cannot begin when the desktop task is stale or pairing is missing
   assert.equal(unpaired.requests.length, 0);
 });
 
+test('each checkout phase requires the current desktop task before acting', async () => {
+  const app = background();
+  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A', taskId }, apple);
+  assert.equal(await app.send({ type: 'apw-active-task' }, apple), true);
+  await app.send({ type: 'apw-checkout-step', phase: 'bag-clicked' }, apple);
+  assert.equal(await app.send({ type: 'apw-active-task' }, apple), true);
+  await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
+  assert.equal(await app.send({ type: 'apw-active-task' }, 'https://secure11.www.apple.com.cn/shop/checkout'), true);
+  await app.send({ type: 'apw-checkout-step', phase: 'order-submitted' }, 'https://secure11.www.apple.com.cn/shop/checkout');
+  assert.equal(await app.send({ type: 'apw-active-task' }, 'https://secure11.www.apple.com.cn/shop/checkout'), false);
+});
+
 test('rejects unrelated or forged cashier URLs and missing pairing code', async () => {
   const app = background();
   await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A', taskId }, apple);

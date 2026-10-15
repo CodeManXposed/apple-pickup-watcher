@@ -118,6 +118,8 @@ function renderApp() {
     taskRelease: (key) => control((element) => element?.props?.id === `task-release-${key}`),
     taskRetry: (key) => control((element) => element?.props?.id === `task-retry-${key}`),
     taskRows: () => all((element) => element?.type === "TableRow").length,
+    taskProgressText: () => all((element) => element?.type === "p" && typeof element.props?.children === "string")
+      .map((element) => element.props.children).find((value) => value.includes("上次任务进度") || value.includes("正在核对订单")),
     profileSetupButton: () => control((element) => element?.type === "Button" && element.props.children === "准备独立浏览器"),
     profileEditorButton: () => control((element) => element?.type === "Button" && element.props.children === "打开 Profile 编辑器"),
     startButton: () => control((element) => element?.props?.["aria-label"] === "开始监控"),
@@ -261,6 +263,18 @@ test("the task page displays the latest cashier or QR payment link", () => {
   assert.equal(app.paymentLinks()[0].href, qr, "a refreshed QR link should replace the cashier link");
   app.state.botStatus = { ...app.state.botStatus, taskId: "next", stage: "starting" };
   assert.deepEqual(app.paymentLinks(), [], "a late payment event from the previous task must stay hidden");
+});
+
+test("restored checkout progress explains that automatic actions are paused", () => {
+  const app = renderApp();
+  app.state.botStatus = {
+    partNumber: "MJYE4CH/A", storeNumber: "R683", taskId: "restored",
+    stage: "review", updatedAt: 1, automationActive: false,
+  };
+  app.tab("tasks").onClick();
+  assert.match(app.taskProgressText(), /自动操作已暂停/);
+  app.state.botStatus = { ...app.state.botStatus, automationActive: true };
+  assert.match(app.taskProgressText(), /正在核对订单总额/);
 });
 
 test("a failed browser preflight is visible without starting monitoring", async () => {

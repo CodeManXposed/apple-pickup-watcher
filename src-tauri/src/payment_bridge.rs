@@ -5,7 +5,9 @@ use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -21,10 +23,12 @@ pub const PORT: u16 = 43849;
 pub const EVENT_CHANNEL: &str = "watcher://payment-link";
 pub const STATUS_CHANNEL: &str = "watcher://bot-status";
 const TOKEN_FILE: &str = "extension-pairing-code";
+const SESSION_FILE: &str = "checkout-session.v1.json";
+const SESSION_TTL_SECONDS: u64 = 60 * 60;
 const MAX_HEADER: usize = 16 << 10;
 const MAX_BODY: usize = 8 << 10;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PaymentLink {
     pub url: String,
@@ -44,7 +48,7 @@ struct IncomingLink {
     task_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotStatus {
     pub part_number: String,
@@ -52,6 +56,8 @@ pub struct BotStatus {
     pub task_id: String,
     pub stage: String,
     pub updated_at: u64,
+    #[serde(default)]
+    pub automation_active: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,9 +79,24 @@ struct IncomingTask {
 
 pub struct PaymentBridge {
     token: Option<String>,
-    latest: RwLock<Option<PaymentLink>>,
-    status: RwLock<Option<BotStatus>>,
+    session_path: Option<PathBuf>,
+    session: RwLock<BridgeSession>,
+    live_task_id: RwLock<Option<String>>,
     discord_delivery: tokio::sync::Mutex<DiscordDelivery>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeSession {
+    status: Option<BotStatus>,
+    latest: Option<PaymentLink>,
+}
+
+fn link_is_fresh(current: Option<&PaymentLink>, link: &PaymentLink) -> bool {
+    current.is_none_or(|old| {
+        old.task_id != link.task_id
+            || old.url != link.url && !(old.kind == "qr" && link.kind == "cashier")
+    })
 }
 
 #[derive(Default)]
@@ -110,8 +131,9 @@ impl PaymentBridge {
     pub fn disabled() -> Self {
         Self {
             token: None,
-            latest: RwLock::new(None),
-            status: RwLock::new(None),
+            session_path: None,
+            session: RwLock::new(BridgeSession::default()),
+            live_task_id: RwLock::new(None),
             discord_delivery: tokio::sync::Mutex::new(DiscordDelivery::default()),
         }
     }
@@ -123,16 +145,18 @@ impl PaymentBridge {
     }
 
     pub fn latest(&self) -> Option<PaymentLink> {
-        self.latest
+        self.session
             .read()
             .unwrap_or_else(|e| e.into_inner())
+            .latest
             .clone()
     }
 
     fn is_current_link(&self, link: &PaymentLink, task_id: &str) -> bool {
-        self.latest
+        self.session
             .read()
             .unwrap_or_else(|e| e.into_inner())
+            .latest
             .as_ref()
             .is_some_and(|current| {
                 current.url == link.url && current.kind == link.kind && current.task_id == task_id
@@ -140,10 +164,35 @@ impl PaymentBridge {
     }
 
     pub fn status(&self) -> Option<BotStatus> {
-        self.status
+        self.session
             .read()
             .unwrap_or_else(|e| e.into_inner())
+            .status
             .clone()
+    }
+
+    pub fn has_progressed(&self, task_id: &str, stage: &str) -> bool {
+        self.status().is_some_and(|status| {
+            status.task_id == task_id
+                && status.stage != "failed"
+                && stage_rank(&status.stage)
+                    .zip(stage_rank(stage))
+                    .is_some_and(|(current, expected)| current >= expected)
+        })
+    }
+
+    fn commit(&self, current: &mut BridgeSession, next: BridgeSession) -> Result<(), String> {
+        if let Some(path) = &self.session_path
+            && let Err(err) = write_session(path, &next)
+        {
+            *self.live_task_id.write().unwrap_or_else(|e| e.into_inner()) = None;
+            if let Some(status) = &mut current.status {
+                status.automation_active = false;
+            }
+            return Err(err);
+        }
+        *current = next;
+        Ok(())
     }
 
     fn is_active_task(&self, task: &IncomingTask) -> bool {
@@ -152,22 +201,36 @@ impl PaymentBridge {
                 && status.store_number == task.store_number
                 && status.task_id == task.task_id
                 && stage_rank(&status.stage).is_some_and(|rank| (1..12).contains(&rank))
+                && status.automation_active
+                && self
+                    .live_task_id
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_deref()
+                    == Some(task.task_id.as_str())
         })
     }
 
-    pub fn start_task(&self, part_number: &str, store_number: &str) -> BotStatus {
+    pub fn start_task(&self, part_number: &str, store_number: &str) -> Result<BotStatus, String> {
         let status = BotStatus {
             part_number: part_number.to_owned(),
             store_number: store_number.to_owned(),
             task_id: uuid::Uuid::new_v4().simple().to_string(),
             stage: "starting".into(),
             updated_at: now(),
+            automation_active: true,
         };
-        let mut current = self.status.write().unwrap_or_else(|e| e.into_inner());
-        let mut latest = self.latest.write().unwrap_or_else(|e| e.into_inner());
-        *current = Some(status.clone());
-        *latest = None;
-        status
+        let mut current = self.session.write().unwrap_or_else(|e| e.into_inner());
+        self.commit(
+            &mut current,
+            BridgeSession {
+                status: Some(status.clone()),
+                latest: None,
+            },
+        )?;
+        *self.live_task_id.write().unwrap_or_else(|e| e.into_inner()) =
+            Some(status.task_id.clone());
+        Ok(status)
     }
 
     pub fn advance_task(
@@ -176,16 +239,20 @@ impl PaymentBridge {
         part_number: &str,
         store_number: &str,
         task_id: &str,
-    ) -> Option<BotStatus> {
-        let next_rank = stage_rank(stage)?;
-        let mut current = self.status.write().unwrap_or_else(|e| e.into_inner());
-        let previous = current.as_ref()?;
+    ) -> Result<Option<BotStatus>, String> {
+        let Some(next_rank) = stage_rank(stage) else {
+            return Ok(None);
+        };
+        let mut current = self.session.write().unwrap_or_else(|e| e.into_inner());
+        let Some(previous) = current.status.as_ref() else {
+            return Ok(None);
+        };
         if previous.part_number != part_number
             || previous.store_number != store_number
             || previous.task_id != task_id
             || stage_rank(&previous.stage).is_none_or(|rank| rank >= next_rank)
         {
-            return None;
+            return Ok(None);
         }
         let next = BotStatus {
             part_number: part_number.to_owned(),
@@ -193,62 +260,176 @@ impl PaymentBridge {
             task_id: task_id.to_owned(),
             stage: stage.to_owned(),
             updated_at: now(),
+            automation_active: previous.automation_active && stage != "failed",
         };
-        *current = Some(next.clone());
-        Some(next)
+        let mut updated = current.clone();
+        updated.status = Some(next.clone());
+        self.commit(&mut current, updated)?;
+        Ok(Some(next))
     }
 
-    pub fn fail_if_stage(&self, task_id: &str, expected_stage: &str) -> Option<BotStatus> {
-        let mut current = self.status.write().unwrap_or_else(|e| e.into_inner());
-        let previous = current.as_ref()?;
+    pub fn fail_if_stage(
+        &self,
+        task_id: &str,
+        expected_stage: &str,
+    ) -> Result<Option<BotStatus>, String> {
+        let mut current = self.session.write().unwrap_or_else(|e| e.into_inner());
+        let Some(previous) = current.status.as_ref() else {
+            return Ok(None);
+        };
         if previous.task_id != task_id || previous.stage != expected_stage {
-            return None;
+            return Ok(None);
         }
         let next = BotStatus {
             stage: "failed".into(),
             updated_at: now(),
+            automation_active: false,
             ..previous.clone()
         };
-        *current = Some(next.clone());
-        Some(next)
-    }
-
-    fn record(&self, link: PaymentLink) -> bool {
-        let mut current = self.latest.write().unwrap_or_else(|e| e.into_inner());
-        if current.as_ref().is_some_and(|old| {
-            old.task_id == link.task_id
-                && (old.url == link.url || old.kind == "qr" && link.kind == "cashier")
-        }) {
-            return false;
-        }
-        *current = Some(link);
-        true
+        let mut updated = current.clone();
+        updated.status = Some(next.clone());
+        self.commit(&mut current, updated)?;
+        Ok(Some(next))
     }
 
     fn record_current(
         &self,
         incoming: &IncomingLink,
         link: PaymentLink,
-    ) -> Option<(bool, Option<BotStatus>)> {
+    ) -> Result<Option<(bool, Option<BotStatus>)>, String> {
         // 链接与阶段一起提交。新任务须等此写锁释放后才能启动；若它随后启动，
         // 会同时清除旧链接，不会被旧任务的迟到响应推进到付款阶段。
-        let mut status = self.status.write().unwrap_or_else(|e| e.into_inner());
+        let mut current = self.session.write().unwrap_or_else(|e| e.into_inner());
         if incoming.task_id.as_deref() != Some(link.task_id.as_str())
-            || !link_matches_task(incoming, status.as_ref())
+            || !link_matches_task(incoming, current.status.as_ref())
         {
-            return None;
+            return Ok(None);
         }
-        let previous = status.as_ref()?.clone();
-        let fresh = self.record(link);
+        let Some(previous) = current.status.as_ref().cloned() else {
+            return Ok(None);
+        };
+        let fresh = link_is_fresh(current.latest.as_ref(), &link);
         let advanced = (previous.stage != "paymentLink").then(|| BotStatus {
             stage: "paymentLink".into(),
             updated_at: now(),
             ..previous
         });
-        if let Some(next) = &advanced {
-            *status = Some(next.clone());
+        let mut updated = current.clone();
+        if fresh {
+            updated.latest = Some(link);
         }
-        Some((fresh, advanced))
+        if let Some(next) = &advanced {
+            updated.status = Some(next.clone());
+        }
+        if fresh || advanced.is_some() {
+            self.commit(&mut current, updated)?;
+        }
+        Ok(Some((fresh, advanced)))
+    }
+
+    #[cfg(test)]
+    fn record(&self, link: PaymentLink) -> bool {
+        let mut current = self.session.write().unwrap_or_else(|e| e.into_inner());
+        let fresh = link_is_fresh(current.latest.as_ref(), &link);
+        if fresh {
+            current.latest = Some(link);
+        }
+        fresh
+    }
+}
+
+fn write_session(path: &Path, session: &BridgeSession) -> Result<(), String> {
+    let dir = path.parent().ok_or("结账会话路径无效")?;
+    let data = serde_json::to_vec(session).map_err(|err| format!("序列化结账会话失败：{err}"))?;
+    let mut staged = tempfile::NamedTempFile::new_in(dir)
+        .map_err(|err| format!("创建结账会话临时文件失败：{err}"))?;
+    #[cfg(unix)]
+    staged
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|err| format!("保护结账会话文件失败：{err}"))?;
+    staged
+        .write_all(&data)
+        .and_then(|()| staged.as_file().sync_all())
+        .map_err(|err| format!("写入结账会话失败：{err}"))?;
+    staged
+        .persist(path)
+        .map_err(|err| format!("替换结账会话文件失败：{}", err.error))?;
+    Ok(())
+}
+
+fn read_session(path: &Path, time: u64) -> Result<BridgeSession, String> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(BridgeSession::default()),
+        Err(err) => return Err(format!("读取结账会话失败：{err}")),
+    };
+    let mut data = Vec::new();
+    file.take(16 * 1024 + 1)
+        .read_to_end(&mut data)
+        .map_err(|err| format!("读取结账会话失败：{err}"))?;
+    if data.len() > 16 * 1024 {
+        return Err("结账会话文件过大".into());
+    }
+    let mut session: BridgeSession =
+        serde_json::from_slice(&data).map_err(|err| format!("解析结账会话失败：{err}"))?;
+    let Some(status) = &session.status else {
+        return if session.latest.is_none() {
+            Ok(session)
+        } else {
+            Err("结账会话缺少任务身份".into())
+        };
+    };
+    let identity = IncomingTask {
+        part_number: status.part_number.clone(),
+        store_number: status.store_number.clone(),
+        task_id: status.task_id.clone(),
+    };
+    if !valid_task_identity(&identity) || stage_rank(&status.stage).is_none() {
+        return Err("结账会话任务身份或阶段无效".into());
+    }
+    if status.stage == "paymentLink" && session.latest.is_none() {
+        return Err("结账会话缺少付款链接".into());
+    }
+    if status.updated_at > time || time - status.updated_at > SESSION_TTL_SECONDS {
+        return Ok(BridgeSession::default());
+    }
+    if let Some(link) = &session.latest
+        && (link.task_id != status.task_id
+            || !matches!(status.stage.as_str(), "paymentLink")
+            || !matches!(link.kind.as_str(), "qr" | "cashier")
+            || !valid_alipay_url(&link.url)
+            || link.received_at > time
+            || time - link.received_at > SESSION_TTL_SECONDS)
+    {
+        return Err("结账会话付款链接无效".into());
+    }
+    if let Some(status) = &mut session.status {
+        status.automation_active = false;
+    }
+    Ok(session)
+}
+
+fn load_session(dir: &Path) -> Result<(BridgeSession, Option<String>), String> {
+    let path = dir.join(SESSION_FILE);
+    match read_session(&path, now()) {
+        Ok(session) => Ok((session, None)),
+        Err(err) => {
+            let archived = dir.join(format!(
+                "{SESSION_FILE}.corrupt-{}-{}",
+                now(),
+                uuid::Uuid::new_v4().simple()
+            ));
+            fs::rename(&path, &archived)
+                .map_err(|archive_err| format!("{err}；留档失败：{archive_err}"))?;
+            Ok((
+                BridgeSession::default(),
+                Some(format!(
+                    "{err}；原文件已留档为 {}，本次不会恢复旧结账任务",
+                    archived.display()
+                )),
+            ))
+        }
     }
 }
 
@@ -287,20 +468,25 @@ fn load_or_create_token(dir: &Path) -> Result<String, String> {
     }
 }
 
-pub fn prepare(app: &AppHandle) -> Result<(PaymentBridge, std::net::TcpListener), String> {
+pub fn prepare(
+    app: &AppHandle,
+) -> Result<(PaymentBridge, std::net::TcpListener, Option<String>), String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     let token = load_or_create_token(&dir)?;
+    let (session, notice) = load_session(&dir)?;
     let listener = std::net::TcpListener::bind(("127.0.0.1", PORT))
         .map_err(|e| format!("监听本机端口 {PORT} 失败：{e}"))?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     Ok((
         PaymentBridge {
             token: Some(token),
-            latest: RwLock::new(None),
-            status: RwLock::new(None),
+            session_path: Some(dir.join(SESSION_FILE)),
+            session: RwLock::new(session),
+            live_task_id: RwLock::new(None),
             discord_delivery: tokio::sync::Mutex::new(DiscordDelivery::default()),
         },
         listener,
+        notice,
     ))
 }
 
@@ -548,12 +734,14 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
             return;
         }
         let advanced = if incoming.stage == "failed" {
-            bridge.status().and_then(|current| {
-                (current.part_number == incoming.part_number
-                    && current.store_number == incoming.store_number)
-                    .then(|| bridge.fail_if_stage(&incoming.task_id, "launched"))
-                    .flatten()
-            })
+            if bridge.status().is_some_and(|current| {
+                current.part_number == incoming.part_number
+                    && current.store_number == incoming.store_number
+            }) {
+                bridge.fail_if_stage(&incoming.task_id, "launched")
+            } else {
+                Ok(None)
+            }
         } else {
             bridge.advance_task(
                 &incoming.stage,
@@ -562,9 +750,17 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
                 &incoming.task_id,
             )
         };
-        let Some(status) = advanced else {
-            respond(&mut socket, 409, origin, "{}").await;
-            return;
+        let status = match advanced {
+            Ok(Some(status)) => status,
+            Ok(None) => {
+                respond(&mut socket, 409, origin, "{}").await;
+                return;
+            }
+            Err(err) => {
+                respond(&mut socket, 500, origin, "{}").await;
+                let _ = app.emit(NOTICE_CHANNEL, format!("保存结账任务状态失败：{err}"));
+                return;
+            }
         };
         respond(&mut socket, 200, origin, "{\"ok\":true}").await;
         let _ = app.emit(STATUS_CHANNEL, status);
@@ -613,9 +809,17 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
             .as_secs(),
         task_id: task_id.clone(),
     };
-    let Some((fresh, advanced)) = bridge.record_current(&incoming, link.clone()) else {
-        respond(&mut socket, 409, origin, "{}").await;
-        return;
+    let (fresh, advanced) = match bridge.record_current(&incoming, link.clone()) {
+        Ok(Some(result)) => result,
+        Ok(None) => {
+            respond(&mut socket, 409, origin, "{}").await;
+            return;
+        }
+        Err(err) => {
+            respond(&mut socket, 500, origin, "{}").await;
+            let _ = app.emit(NOTICE_CHANNEL, format!("保存支付宝链接失败：{err}"));
+            return;
+        }
     };
     respond(&mut socket, 200, origin, "{\"ok\":true}").await;
     if let Some(status) = advanced {
@@ -749,12 +953,131 @@ async fn send_discord(app: AppHandle, link: PaymentLink, task_id: String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiscordDelivery, IncomingLink, IncomingStatus, IncomingTask, PaymentBridge, PaymentLink,
-        link_matches_task, read_request, respond, valid_alipay_url, valid_origin,
-        valid_task_status,
+        BridgeSession, DiscordDelivery, IncomingLink, IncomingStatus, IncomingTask, PaymentBridge,
+        PaymentLink, link_matches_task, load_session, now, read_request, read_session, respond,
+        valid_alipay_url, valid_origin, valid_task_status,
     };
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
+
+    fn persistent_bridge(path: &Path, session: BridgeSession) -> PaymentBridge {
+        let mut bridge = PaymentBridge::disabled();
+        bridge.session_path = Some(path.to_owned());
+        *bridge.session.write().unwrap() = session;
+        bridge
+    }
+
+    #[test]
+    fn restart_restores_checkout_identity_and_payment_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("checkout-session.v1.json");
+        let bridge = persistent_bridge(&path, BridgeSession::default());
+        let task = bridge.start_task("MJYE4CH/A", "R683").unwrap();
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        bridge
+            .advance_task("review", "MJYE4CH/A", "R683", &task.task_id)
+            .unwrap();
+
+        let resumed = persistent_bridge(&path, read_session(&path, now()).unwrap());
+        assert!(!resumed.is_active_task(&IncomingTask {
+            part_number: "MJYE4CH/A".into(),
+            store_number: "R683".into(),
+            task_id: task.task_id.clone(),
+        }));
+        let restored_status = resumed.status().unwrap();
+        assert_eq!(restored_status.stage, "review");
+        assert!(!restored_status.automation_active);
+        resumed
+            .advance_task("orderSubmitted", "MJYE4CH/A", "R683", &task.task_id)
+            .unwrap();
+        let incoming = IncomingLink {
+            url: "https://qr.alipay.com/current-order".into(),
+            kind: "qr".into(),
+            part_number: Some("MJYE4CH/A".into()),
+            store_number: Some("R683".into()),
+            task_id: Some(task.task_id.clone()),
+        };
+        let link = PaymentLink {
+            url: incoming.url.clone(),
+            kind: incoming.kind.clone(),
+            received_at: now(),
+            task_id: task.task_id.clone(),
+        };
+        assert!(
+            resumed
+                .record_current(&incoming, link.clone())
+                .unwrap()
+                .unwrap()
+                .0
+        );
+
+        let after_payment = persistent_bridge(&path, read_session(&path, now()).unwrap());
+        assert_eq!(after_payment.status().unwrap().stage, "paymentLink");
+        assert_eq!(after_payment.latest().unwrap().url, link.url);
+        after_payment.start_task("MG724CH/A", "R683").unwrap();
+        let after_next_task = persistent_bridge(&path, read_session(&path, now()).unwrap());
+        assert!(after_next_task.latest().is_none());
+        assert!(
+            after_next_task
+                .record_current(&incoming, link)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn stale_or_damaged_session_never_resumes_and_damaged_file_is_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("checkout-session.v1.json");
+        let bridge = persistent_bridge(&path, BridgeSession::default());
+        bridge.start_task("MJYE4CH/A", "R683").unwrap();
+        assert!(
+            read_session(&path, now() + 60 * 60 + 1)
+                .unwrap()
+                .status
+                .is_none()
+        );
+        std::fs::write(&path, b"{broken").unwrap();
+        let (loaded, notice) = load_session(dir.path()).unwrap();
+        assert!(loaded.status.is_none());
+        assert!(notice.unwrap().contains("留档"));
+        assert!(!path.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failed_session_write_does_not_replace_current_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("checkout-session.v1.json");
+        let mut bridge = persistent_bridge(&path, BridgeSession::default());
+        let first = bridge.start_task("MJYE4CH/A", "R683").unwrap();
+        bridge
+            .advance_task("launched", "MJYE4CH/A", "R683", &first.task_id)
+            .unwrap();
+        let old_task = IncomingTask {
+            part_number: "MJYE4CH/A".into(),
+            store_number: "R683".into(),
+            task_id: first.task_id.clone(),
+        };
+        assert!(bridge.is_active_task(&old_task));
+        let occupied = dir.path().join("occupied");
+        std::fs::create_dir(&occupied).unwrap();
+        bridge.session_path = Some(occupied);
+        assert!(bridge.start_task("MG724CH/A", "R683").is_err());
+        assert!(!bridge.is_active_task(&old_task));
+        assert_eq!(bridge.status().unwrap().task_id, first.task_id);
+        assert_eq!(
+            read_session(&path, now()).unwrap().status.unwrap().task_id,
+            first.task_id
+        );
+    }
 
     #[test]
     fn accepts_only_extension_origins_and_alipay_https_links() {
@@ -794,25 +1117,31 @@ mod tests {
     #[test]
     fn task_status_follows_one_target_and_never_moves_backward() {
         let bridge = PaymentBridge::disabled();
-        let task_id = bridge.start_task("MJYE4CH/A", "R683").task_id;
+        let task_id = bridge.start_task("MJYE4CH/A", "R683").unwrap().task_id;
         assert!(
             bridge
                 .advance_task("bag", "MJYE4CH/A", "R683", &task_id)
+                .unwrap()
                 .is_some()
         );
+        assert!(bridge.has_progressed(&task_id, "launched"));
+        assert!(!bridge.has_progressed("other-task", "launched"));
         assert!(
             bridge
                 .advance_task("guest", "MJYE4CH/A", "R683", &task_id)
+                .unwrap()
                 .is_some()
         );
         assert!(
             bridge
                 .advance_task("checkout", "MJYE4CH/A", "R683", &task_id)
+                .unwrap()
                 .is_none()
         );
         assert!(
             bridge
                 .advance_task("payment", "MJYE4CH/A", "R999", &task_id)
+                .unwrap()
                 .is_none()
         );
         assert_eq!(bridge.status().unwrap().stage, "guest");
@@ -839,29 +1168,39 @@ mod tests {
     #[test]
     fn active_task_check_rejects_replaced_failed_and_submitted_tasks() {
         let bridge = PaymentBridge::disabled();
-        let first_id = bridge.start_task("MJYE4CH/A", "R683").task_id;
+        let first_id = bridge.start_task("MJYE4CH/A", "R683").unwrap().task_id;
         let first = IncomingTask {
             part_number: "MJYE4CH/A".into(),
             store_number: "R683".into(),
             task_id: first_id.clone(),
         };
         assert!(!bridge.is_active_task(&first));
-        bridge.advance_task("launched", "MJYE4CH/A", "R683", &first_id);
+        bridge
+            .advance_task("launched", "MJYE4CH/A", "R683", &first_id)
+            .unwrap();
         assert!(bridge.is_active_task(&first));
-        let second_id = bridge.start_task("MJYE4CH/A", "R683").task_id;
+        let second_id = bridge.start_task("MJYE4CH/A", "R683").unwrap().task_id;
         assert!(!bridge.is_active_task(&first));
         let second = IncomingTask {
             task_id: second_id.clone(),
             ..first
         };
-        bridge.advance_task("launched", "MJYE4CH/A", "R683", &second_id);
-        bridge.advance_task("review", "MJYE4CH/A", "R683", &second_id);
+        bridge
+            .advance_task("launched", "MJYE4CH/A", "R683", &second_id)
+            .unwrap();
+        bridge
+            .advance_task("review", "MJYE4CH/A", "R683", &second_id)
+            .unwrap();
         assert!(bridge.is_active_task(&second));
-        bridge.advance_task("orderSubmitted", "MJYE4CH/A", "R683", &second_id);
+        bridge
+            .advance_task("orderSubmitted", "MJYE4CH/A", "R683", &second_id)
+            .unwrap();
         assert!(!bridge.is_active_task(&second));
-        let third_id = bridge.start_task("MJYE4CH/A", "R683").task_id;
-        bridge.advance_task("launched", "MJYE4CH/A", "R683", &third_id);
-        bridge.fail_if_stage(&third_id, "launched");
+        let third_id = bridge.start_task("MJYE4CH/A", "R683").unwrap().task_id;
+        bridge
+            .advance_task("launched", "MJYE4CH/A", "R683", &third_id)
+            .unwrap();
+        bridge.fail_if_stage(&third_id, "launched").unwrap();
         assert!(!bridge.is_active_task(&IncomingTask {
             task_id: third_id,
             ..second
@@ -871,17 +1210,27 @@ mod tests {
     #[test]
     fn stale_launch_watchdog_cannot_fail_a_progressed_or_new_task() {
         let bridge = PaymentBridge::disabled();
-        let old_id = bridge.start_task("MJYE4CH/A", "R683").task_id;
-        bridge.advance_task("launched", "MJYE4CH/A", "R683", &old_id);
-        bridge.advance_task("bag", "MJYE4CH/A", "R683", &old_id);
-        assert!(bridge.fail_if_stage(&old_id, "launched").is_none());
+        let old_id = bridge.start_task("MJYE4CH/A", "R683").unwrap().task_id;
+        bridge
+            .advance_task("launched", "MJYE4CH/A", "R683", &old_id)
+            .unwrap();
+        bridge
+            .advance_task("bag", "MJYE4CH/A", "R683", &old_id)
+            .unwrap();
+        assert!(bridge.fail_if_stage(&old_id, "launched").unwrap().is_none());
         assert_eq!(bridge.status().unwrap().stage, "bag");
 
-        let new_id = bridge.start_task("MG724CH/A", "R683").task_id;
-        bridge.advance_task("launched", "MG724CH/A", "R683", &new_id);
-        assert!(bridge.fail_if_stage(&old_id, "launched").is_none());
+        let new_id = bridge.start_task("MG724CH/A", "R683").unwrap().task_id;
+        bridge
+            .advance_task("launched", "MG724CH/A", "R683", &new_id)
+            .unwrap();
+        assert!(bridge.fail_if_stage(&old_id, "launched").unwrap().is_none());
         assert_eq!(
-            bridge.fail_if_stage(&new_id, "launched").unwrap().stage,
+            bridge
+                .fail_if_stage(&new_id, "launched")
+                .unwrap()
+                .unwrap()
+                .stage,
             "failed"
         );
     }
@@ -889,7 +1238,7 @@ mod tests {
     #[test]
     fn manual_checkout_actions_advance_before_payment() {
         let bridge = PaymentBridge::disabled();
-        let task_id = bridge.start_task("MJYE4CH/A", "R683").task_id;
+        let task_id = bridge.start_task("MJYE4CH/A", "R683").unwrap().task_id;
         for stage in [
             "launched",
             "bag",
@@ -905,6 +1254,7 @@ mod tests {
                 bridge
                     .advance_task(stage, "MJYE4CH/A", "R683", &task_id)
                     .unwrap()
+                    .unwrap()
                     .stage,
                 stage
             );
@@ -912,6 +1262,7 @@ mod tests {
         assert!(
             bridge
                 .advance_task("privacy", "MJYE4CH/A", "R683", &task_id)
+                .unwrap()
                 .is_none()
         );
     }
@@ -919,7 +1270,7 @@ mod tests {
     #[test]
     fn payment_link_cannot_complete_another_active_task() {
         let bridge = PaymentBridge::disabled();
-        let first_id = bridge.start_task("MJYE4CH/A", "R683").task_id;
+        let first_id = bridge.start_task("MJYE4CH/A", "R683").unwrap().task_id;
         let link = IncomingLink {
             url: "https://qr.alipay.com/abc123".into(),
             kind: "qr".into(),
@@ -929,13 +1280,16 @@ mod tests {
         };
         assert!(!link_matches_task(&link, None));
         assert!(!link_matches_task(&link, bridge.status().as_ref()));
-        bridge.advance_task("orderSubmitted", "MJYE4CH/A", "R683", &first_id);
+        bridge
+            .advance_task("orderSubmitted", "MJYE4CH/A", "R683", &first_id)
+            .unwrap();
         assert!(link_matches_task(&link, bridge.status().as_ref()));
-        let second_id = bridge.start_task("MJYE4CH/A", "R683").task_id;
+        let second_id = bridge.start_task("MJYE4CH/A", "R683").unwrap().task_id;
         assert_ne!(first_id, second_id);
         assert!(
             bridge
                 .advance_task("review", "MJYE4CH/A", "R683", &first_id)
+                .unwrap()
                 .is_none()
         );
         assert!(!link_matches_task(&link, bridge.status().as_ref()));
@@ -944,10 +1298,12 @@ mod tests {
     #[test]
     fn starting_another_task_clears_its_predecessors_link_and_rejects_late_delivery() {
         let bridge = PaymentBridge::disabled();
-        let old_status = bridge.start_task("MJYE4CH/A", "R683");
+        let old_status = bridge.start_task("MJYE4CH/A", "R683").unwrap();
         let old_id = old_status.task_id.clone();
         assert_eq!(serde_json::to_value(&old_status).unwrap()["taskId"], old_id);
-        bridge.advance_task("orderSubmitted", "MJYE4CH/A", "R683", &old_id);
+        bridge
+            .advance_task("orderSubmitted", "MJYE4CH/A", "R683", &old_id)
+            .unwrap();
         let incoming = IncomingLink {
             url: "https://qr.alipay.com/old-order".into(),
             kind: "qr".into(),
@@ -961,7 +1317,10 @@ mod tests {
             received_at: 1,
             task_id: incoming.task_id.clone().unwrap(),
         };
-        let (fresh, advanced) = bridge.record_current(&incoming, link.clone()).unwrap();
+        let (fresh, advanced) = bridge
+            .record_current(&incoming, link.clone())
+            .unwrap()
+            .unwrap();
         assert!(fresh);
         assert_eq!(advanced.unwrap().stage, "paymentLink");
         assert_eq!(bridge.latest().unwrap().url, link.url);
@@ -981,13 +1340,16 @@ mod tests {
             url: refreshed.url.clone(),
             ..link.clone()
         };
-        let (fresh, advanced) = bridge.record_current(&refreshed, updated_link).unwrap();
+        let (fresh, advanced) = bridge
+            .record_current(&refreshed, updated_link)
+            .unwrap()
+            .unwrap();
         assert!(fresh);
         assert!(advanced.is_none(), "二维码刷新不应重复推进任务阶段");
 
-        let new_status = bridge.start_task("MG724CH/A", "R683");
+        let new_status = bridge.start_task("MG724CH/A", "R683").unwrap();
         assert!(bridge.latest().is_none());
-        assert!(bridge.record_current(&incoming, link).is_none());
+        assert!(bridge.record_current(&incoming, link).unwrap().is_none());
         assert!(bridge.latest().is_none());
         assert_eq!(bridge.status().unwrap().task_id, new_status.task_id);
         assert_eq!(bridge.status().unwrap().stage, "starting");

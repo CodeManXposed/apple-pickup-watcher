@@ -524,7 +524,7 @@ async fn open_auto_add(
         Some((target.part_number.as_str(), target.store_number.as_str())),
         |url| async move {
             let bridge = app.state::<PaymentBridge>();
-            let status = bridge.start_task(&target.part_number, &target.store_number);
+            let status = bridge.start_task(&target.part_number, &target.store_number)?;
             let task_id = status.task_id.clone();
             let _ = app.emit(payment_bridge::EVENT_CHANNEL, Option::<PaymentLink>::None);
             let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
@@ -584,10 +584,19 @@ async fn open_auto_add(
                 }
             };
             let stage = if result.is_ok() { "launched" } else { "failed" };
-            if let Some(status) =
-                bridge.advance_task(stage, &target.part_number, &target.store_number, &task_id)
-            {
-                let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
+            match bridge.advance_task(stage, &target.part_number, &target.store_number, &task_id) {
+                Ok(Some(status)) => {
+                    let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
+                }
+                Err(err) => {
+                    let _ = app.emit(NOTICE_CHANNEL, format!("保存结账任务状态失败：{err}；本轮已停止，避免重复加车"));
+                    return Ok(());
+                }
+                Ok(None) if bridge.has_progressed(&task_id, stage) => {}
+                Ok(None) => {
+                    let _ = app.emit(NOTICE_CHANNEL, "结账任务已被替换或阶段已变化；本轮停止自动加车");
+                    return Ok(());
+                }
             }
             if result.is_ok() {
                 let watchdog_app = app.clone();
@@ -602,9 +611,13 @@ async fn open_auto_add(
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(Duration::from_secs(90)).await;
                     let bridge = watchdog_app.state::<PaymentBridge>();
-                    if let Some(status) = bridge.fail_if_stage(&task_id, "launched") {
-                        let _ = watchdog_app.emit(payment_bridge::STATUS_CHANNEL, status);
-                        let _ = watchdog_app.emit(NOTICE_CHANNEL, watchdog_message);
+                    match bridge.fail_if_stage(&task_id, "launched") {
+                        Ok(Some(status)) => {
+                            let _ = watchdog_app.emit(payment_bridge::STATUS_CHANNEL, status);
+                            let _ = watchdog_app.emit(NOTICE_CHANNEL, watchdog_message);
+                        }
+                        Err(err) => { let _ = watchdog_app.emit(NOTICE_CHANNEL, format!("保存结账任务状态失败：{err}")); }
+                        Ok(None) => {}
                     }
                 });
             }
@@ -1100,7 +1113,12 @@ pub fn run() {
 
             let handle: AppHandle = app.handle().clone();
             let (bridge, bridge_listener) = match payment_bridge::prepare(&handle) {
-                Ok((bridge, listener)) => (bridge, Some(listener)),
+                Ok((bridge, listener, notice)) => {
+                    if let Some(notice) = notice {
+                        notices.push(notice);
+                    }
+                    (bridge, Some(listener))
+                }
                 Err(err) => {
                     notices.push(format!("付款链接桥接不可用：{err}"));
                     (PaymentBridge::disabled(), None)
