@@ -163,8 +163,10 @@ impl PaymentBridge {
             stage: "starting".into(),
             updated_at: now(),
         };
-        *self.status.write().unwrap_or_else(|e| e.into_inner()) = Some(status.clone());
-        *self.latest.write().unwrap_or_else(|e| e.into_inner()) = None;
+        let mut current = self.status.write().unwrap_or_else(|e| e.into_inner());
+        let mut latest = self.latest.write().unwrap_or_else(|e| e.into_inner());
+        *current = Some(status.clone());
+        *latest = None;
         status
     }
 
@@ -223,15 +225,30 @@ impl PaymentBridge {
         true
     }
 
-    fn record_current(&self, incoming: &IncomingLink, link: PaymentLink) -> Option<bool> {
-        // 持有状态读锁直到链接写入结束；新任务须等待它完成，然后清除旧链接。
-        let status = self.status.read().unwrap_or_else(|e| e.into_inner());
+    fn record_current(
+        &self,
+        incoming: &IncomingLink,
+        link: PaymentLink,
+    ) -> Option<(bool, Option<BotStatus>)> {
+        // 链接与阶段一起提交。新任务须等此写锁释放后才能启动；若它随后启动，
+        // 会同时清除旧链接，不会被旧任务的迟到响应推进到付款阶段。
+        let mut status = self.status.write().unwrap_or_else(|e| e.into_inner());
         if incoming.task_id.as_deref() != Some(link.task_id.as_str())
             || !link_matches_task(incoming, status.as_ref())
         {
             return None;
         }
-        Some(self.record(link))
+        let previous = status.as_ref()?.clone();
+        let fresh = self.record(link);
+        let advanced = (previous.stage != "paymentLink").then(|| BotStatus {
+            stage: "paymentLink".into(),
+            updated_at: now(),
+            ..previous
+        });
+        if let Some(next) = &advanced {
+            *status = Some(next.clone());
+        }
+        Some((fresh, advanced))
     }
 }
 
@@ -596,18 +613,10 @@ async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
             .as_secs(),
         task_id: task_id.clone(),
     };
-    let Some(fresh) = bridge.record_current(&incoming, link.clone()) else {
+    let Some((fresh, advanced)) = bridge.record_current(&incoming, link.clone()) else {
         respond(&mut socket, 409, origin, "{}").await;
         return;
     };
-    let advanced = bridge.status().and_then(|status| {
-        bridge.advance_task(
-            "paymentLink",
-            &status.part_number,
-            &status.store_number,
-            &status.task_id,
-        )
-    });
     respond(&mut socket, 200, origin, "{\"ok\":true}").await;
     if let Some(status) = advanced {
         let _ = app.emit(STATUS_CHANNEL, status);
@@ -952,17 +961,36 @@ mod tests {
             received_at: 1,
             task_id: incoming.task_id.clone().unwrap(),
         };
-        assert_eq!(bridge.record_current(&incoming, link.clone()), Some(true));
+        let (fresh, advanced) = bridge.record_current(&incoming, link.clone()).unwrap();
+        assert!(fresh);
+        assert_eq!(advanced.unwrap().stage, "paymentLink");
         assert_eq!(bridge.latest().unwrap().url, link.url);
         assert_eq!(
             serde_json::to_value(bridge.latest().unwrap()).unwrap()["taskId"],
             incoming.task_id.as_deref().unwrap()
         );
 
-        bridge.start_task("MG724CH/A", "R683");
+        let refreshed = IncomingLink {
+            url: "https://qr.alipay.com/new-order-code".into(),
+            kind: incoming.kind.clone(),
+            part_number: incoming.part_number.clone(),
+            store_number: incoming.store_number.clone(),
+            task_id: incoming.task_id.clone(),
+        };
+        let updated_link = PaymentLink {
+            url: refreshed.url.clone(),
+            ..link.clone()
+        };
+        let (fresh, advanced) = bridge.record_current(&refreshed, updated_link).unwrap();
+        assert!(fresh);
+        assert!(advanced.is_none(), "二维码刷新不应重复推进任务阶段");
+
+        let new_status = bridge.start_task("MG724CH/A", "R683");
         assert!(bridge.latest().is_none());
-        assert_eq!(bridge.record_current(&incoming, link), None);
+        assert!(bridge.record_current(&incoming, link).is_none());
         assert!(bridge.latest().is_none());
+        assert_eq!(bridge.status().unwrap().task_id, new_status.task_id);
+        assert_eq!(bridge.status().unwrap().stage, "starting");
     }
 
     #[test]
