@@ -162,7 +162,30 @@ async fn direct_release_add(
                 "发售任务已暂停；本轮不会继续直连加车或自动结账。".into(),
             ));
         }
-        AddOutcome::Stop(reason) => return Ok(DirectReleaseResult::NoRetry(reason)),
+        AddOutcome::Stop { reason, cookies } => {
+            if cookies.is_empty() {
+                return Ok(DirectReleaseResult::NoRetry(format!(
+                    "{reason}；请在原发售标签页处理验证或等待放行。"
+                )));
+            }
+            let app_copy = app.clone();
+            let url = session.product_page().to_string();
+            let tab_id = tab_id.to_owned();
+            let handoff = tauri::async_runtime::spawn_blocking(move || {
+                browser_bot::open_direct_product(&app_copy, &url, &cookies, Some(&tab_id))
+            })
+            .await
+            .map_err(|err| err.to_string())
+            .and_then(|result| result);
+            return Ok(DirectReleaseResult::NoRetry(match handoff {
+                Ok(()) => {
+                    format!("{reason}；已将直连会话交给原发售标签页，请在那里处理验证或等待放行。")
+                }
+                Err(err) => {
+                    format!("{reason}；无法把直连会话交给发售标签页：{err}。请手动检查页面。")
+                }
+            }));
+        }
         AddOutcome::Uncertain { reason, cookies } => {
             let inspection = if cookies.is_empty() {
                 Err("会话没有可交接的 Apple Cookie".to_owned())

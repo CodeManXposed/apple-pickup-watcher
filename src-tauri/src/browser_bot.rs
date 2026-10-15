@@ -896,29 +896,60 @@ pub(crate) fn open_task(app: &AppHandle, url: &str) -> Result<(), String> {
     prewarm_task(app, url).map(|_| ())
 }
 
-/// 将直连加车会话的 Cookie 放入独立浏览器，然后从同一会话核对购物袋。
+/// 将直连会话的 Cookie 放入独立浏览器，再打开商品页或购物袋。
 /// Cookie 仅在本机内存与本机 CDP 连接中传递，不写入桌面设置。
-pub(crate) fn open_direct_bag(
-    app: &AppHandle,
-    url: &str,
-    cookies: &[SessionCookie],
-    target_id: Option<&str>,
-) -> Result<(), String> {
-    let parsed = reqwest::Url::parse(url).map_err(|_| "购物袋地址无效".to_owned())?;
+fn validate_handoff_url(url: &str, bag: bool) -> Result<reqwest::Url, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| "Apple 商店地址无效".to_owned())?;
+    let shop_prefix = [
+        "/shop/",
+        "/hk-zh/shop/",
+        "/tw/shop/",
+        "/jp/shop/",
+        "/sg/shop/",
+        "/au/shop/",
+        "/my/shop/",
+    ]
+    .into_iter()
+    .find(|prefix| parsed.path().starts_with(prefix));
+    let valid_path = shop_prefix.is_some_and(|prefix| {
+        if (parsed.host_str() == Some("www.apple.com.cn")) != (prefix == "/shop/") {
+            return false;
+        }
+        let bag_path = format!("{prefix}bag");
+        if bag {
+            parsed.path() == bag_path
+        } else {
+            parsed.path() != bag_path && parsed.query().is_none() && parsed.fragment().is_none()
+        }
+    });
     if parsed.scheme() != "https"
         || !matches!(
             parsed.host_str(),
             Some("www.apple.com" | "www.apple.com.cn")
         )
-        || !parsed.path().ends_with("/shop/bag")
+        || parsed.port().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || !valid_path
     {
-        return Err("只能打开 Apple 官方购物袋".into());
+        return Err("只能打开 Apple 官方商品页或购物袋".into());
     }
+    Ok(parsed)
+}
+
+fn open_apple_page_with_cookies(
+    app: &AppHandle,
+    url: &str,
+    cookies: &[SessionCookie],
+    target_id: Option<&str>,
+    bag: bool,
+) -> Result<(), String> {
+    let parsed = validate_handoff_url(url, bag)?;
     let _guard = BROWSER_LAUNCH
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let (mut browser, _) = loaded_browser(app)?;
-    let host = parsed.host_str().ok_or("购物袋地址缺少域名")?;
+    let host = parsed.host_str().ok_or("Apple 商店地址缺少域名")?;
     let cookie_params = cookies
         .iter()
         .filter(|cookie| {
@@ -979,10 +1010,28 @@ pub(crate) fn open_direct_bag(
             serde_json::json!({"url": url}),
         )?;
         if created.get("targetId").and_then(Value::as_str).is_none() {
-            return Err("独立浏览器未打开购物袋".into());
+            return Err("独立浏览器未打开 Apple 商店页面".into());
         }
     }
     Ok(())
+}
+
+pub(crate) fn open_direct_bag(
+    app: &AppHandle,
+    url: &str,
+    cookies: &[SessionCookie],
+    target_id: Option<&str>,
+) -> Result<(), String> {
+    open_apple_page_with_cookies(app, url, cookies, target_id, true)
+}
+
+pub(crate) fn open_direct_product(
+    app: &AppHandle,
+    url: &str,
+    cookies: &[SessionCookie],
+    target_id: Option<&str>,
+) -> Result<(), String> {
+    open_apple_page_with_cookies(app, url, cookies, target_id, false)
 }
 
 pub(crate) fn apple_cookies(app: &AppHandle, host: &str) -> Result<Vec<SessionCookie>, String> {
@@ -1173,6 +1222,35 @@ pub(crate) fn open_profile(app: &AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_session_handoff_only_opens_official_shop_pages() {
+        assert!(
+            validate_handoff_url("https://www.apple.com.cn/shop/bag#apw-checkout=1", true).is_ok()
+        );
+        assert!(
+            validate_handoff_url("https://www.apple.com.cn/shop/pdpAddToBag/MJYE4CH/A", false)
+                .is_ok()
+        );
+        assert!(
+            validate_handoff_url(
+                "https://www.apple.com/hk-zh/shop/buy-iphone/model/SKU/A",
+                false
+            )
+            .is_ok()
+        );
+        assert!(validate_handoff_url("https://www.apple.com/tw/shop/bag", true).is_ok());
+        assert!(
+            validate_handoff_url(
+                "https://www.apple.com.cn/shop/buy-iphone/model?add-to-cart=add-to-cart",
+                false
+            )
+            .is_err()
+        );
+        assert!(validate_handoff_url("https://www.apple.com.cn/shop/bag", false).is_err());
+        assert!(validate_handoff_url("https://user@www.apple.com.cn/shop/bag", true).is_err());
+        assert!(validate_handoff_url("https://example.com/shop/bag", true).is_err());
+    }
 
     #[test]
     fn release_refresh_keeps_the_configured_product_path() {

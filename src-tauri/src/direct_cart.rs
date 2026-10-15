@@ -17,7 +17,10 @@ pub(crate) enum AddOutcome {
     Confirmed(Vec<SessionCookie>),
     Cancelled,
     /// 风控阻断或响应不足以确认购物袋状态；本轮停止以免重复加车。
-    Stop(String),
+    Stop {
+        reason: String,
+        cookies: Vec<SessionCookie>,
+    },
     /// 请求可能已被 Apple 执行；交出同一会话供人工核对，绝不自动重试或结账。
     Uncertain {
         reason: String,
@@ -144,27 +147,48 @@ impl DirectCart {
         &self.product
     }
 
-    fn session_cookies(&self) -> Vec<SessionCookie> {
+    fn session_cookies(&self, page: Option<&Url>) -> Vec<SessionCookie> {
         let Some(host) = self.bag.host_str() else {
             return Vec::new();
         };
-        self.cookies
-            .matches(self.bag.as_str())
-            .map(|cookie| SessionCookie {
-                name: cookie.name().to_owned(),
-                value: cookie.value().to_owned(),
-                domain: cookie.domain().unwrap_or(host).to_owned(),
-                path: cookie.path().unwrap_or("/").to_owned(),
-                http_only: cookie.http_only(),
-                secure: cookie.secure(),
-            })
-            .collect()
+        // 等待页的 Cookie 可能只覆盖商品路径，不能只取购物袋可见的 Cookie。
+        let mut selected: Vec<SessionCookie> = Vec::new();
+        for url in [Some(&self.bag), Some(&self.product), page]
+            .into_iter()
+            .flatten()
+        {
+            for cookie in self.cookies.matches(url.as_str()) {
+                let next = SessionCookie {
+                    name: cookie.name().to_owned(),
+                    value: cookie.value().to_owned(),
+                    domain: cookie.domain().unwrap_or(host).to_owned(),
+                    path: cookie.path().unwrap_or("/").to_owned(),
+                    http_only: cookie.http_only(),
+                    secure: cookie.secure(),
+                };
+                if !selected.iter().any(|existing| {
+                    existing.name == next.name
+                        && existing.domain == next.domain
+                        && existing.path == next.path
+                }) {
+                    selected.push(next);
+                }
+            }
+        }
+        selected
     }
 
-    fn uncertain(&self, reason: String) -> AddOutcome {
+    fn stop(&self, reason: String, page: Option<&Url>) -> AddOutcome {
+        AddOutcome::Stop {
+            reason,
+            cookies: self.session_cookies(page),
+        }
+    }
+
+    fn uncertain(&self, reason: String, page: Option<&Url>) -> AddOutcome {
         AddOutcome::Uncertain {
             reason,
-            cookies: self.session_cookies(),
+            cookies: self.session_cookies(page),
         }
     }
 
@@ -275,12 +299,16 @@ impl DirectCart {
         let page = self
             .get_following(self.product.clone(), None, RequestKind::Product)
             .await?;
+        let page_url = Url::parse(&page.uri().to_string()).ok();
         if !page.status().is_success() {
             if matches!(page.status().as_u16(), 403 | 429 | 541) {
-                return Ok(AddOutcome::Stop(format!(
-                    "Apple 商品页返回 HTTP {}，可能需要验证或等待放行；本轮不再直连重试",
-                    page.status().as_u16()
-                )));
+                return Ok(self.stop(
+                    format!(
+                        "Apple 商品页返回 HTTP {}，可能需要验证或等待放行；本轮不再直连重试",
+                        page.status().as_u16()
+                    ),
+                    page_url.as_ref(),
+                ));
             }
             return Err(format!(
                 "Apple 商品页返回 HTTP {}，可能需要验证或等待放行",
@@ -290,9 +318,10 @@ impl DirectCart {
         let canonical = match official_url(&page.uri().to_string(), &self.base, &self.part) {
             Ok(url) => url,
             Err(err) => {
-                return Ok(AddOutcome::Stop(format!(
-                    "{err}；请检查 Apple 等待页，本轮不再直连重试"
-                )));
+                return Ok(self.stop(
+                    format!("{err}；请检查 Apple 等待页，本轮不再直连重试"),
+                    page_url.as_ref(),
+                ));
             }
         };
         // 官网商品页中的信标设置 as_atb Cookie；页面脚本把最后一段作为
@@ -309,14 +338,18 @@ impl DirectCart {
             .get_following(beacon, Some(&canonical), RequestKind::Beacon)
             .await?;
         if !beacon_response.status().is_success() {
-            return Ok(AddOutcome::Stop(format!(
-                "Apple 加车信标返回 HTTP {}；本轮不再直连重试",
-                beacon_response.status().as_u16()
-            )));
+            return Ok(self.stop(
+                format!(
+                    "Apple 加车信标返回 HTTP {}；本轮不再直连重试",
+                    beacon_response.status().as_u16()
+                ),
+                Some(&canonical),
+            ));
         }
         let Some(token) = atb_token(&self.cookies, &canonical) else {
-            return Ok(AddOutcome::Stop(
+            return Ok(self.stop(
                 "Apple 未提供加车验证令牌；本轮不再直连重试".into(),
+                Some(&canonical),
             ));
         };
         if !is_live() {
@@ -331,25 +364,33 @@ impl DirectCart {
         {
             Ok(response) => response,
             Err(_) => {
-                return Ok(self.uncertain("Apple 加车请求结果不确定（连接或重定向失败）".into()));
+                return Ok(self.uncertain(
+                    "Apple 加车请求结果不确定（连接或重定向失败）".into(),
+                    Some(&canonical),
+                ));
             }
         };
         if !response.status().is_success() {
-            return Ok(self.uncertain(format!(
-                "Apple 加车请求返回 HTTP {}，商品未确认进入购物袋",
-                response.status().as_u16()
-            )));
+            return Ok(self.uncertain(
+                format!(
+                    "Apple 加车请求返回 HTTP {}，商品未确认进入购物袋",
+                    response.status().as_u16()
+                ),
+                Some(&canonical),
+            ));
         }
         let final_url = match Url::parse(&response.uri().to_string()) {
             Ok(url) => url,
             Err(_) => {
-                return Ok(self.uncertain("Apple 加车响应地址无法识别".into()));
+                return Ok(self.uncertain("Apple 加车响应地址无法识别".into(), Some(&canonical)));
             }
         };
         if final_url.host_str() != self.base.host_str() || !accepted(&final_url, &self.part) {
-            return Ok(self.uncertain("Apple 未返回目标 SKU 的加车成功页".into()));
+            return Ok(self.uncertain("Apple 未返回目标 SKU 的加车成功页".into(), Some(&canonical)));
         }
-        Ok(AddOutcome::Confirmed(self.session_cookies()))
+        Ok(AddOutcome::Confirmed(
+            self.session_cookies(Some(&canonical)),
+        ))
     }
 
     pub(crate) fn seed_browser_cookies(&self, cookies: &[SessionCookie]) {
@@ -545,7 +586,7 @@ mod tests {
             http_only: true,
             secure: true,
         }]);
-        let AddOutcome::Uncertain { reason, cookies } = session.uncertain("结果不明".into())
+        let AddOutcome::Uncertain { reason, cookies } = session.uncertain("结果不明".into(), None)
         else {
             panic!("结果不明必须保留浏览器核对用的会话");
         };
@@ -554,6 +595,39 @@ mod tests {
         assert_eq!(cookies[0].name, "test_session");
         assert_eq!(cookies[0].value, "test-value");
         assert!(cookies[0].secure && cookies[0].http_only);
+    }
+
+    #[test]
+    fn pre_add_stop_preserves_product_scoped_cookies_for_browser_verification() {
+        let cn = region_by_locale("zh_CN").unwrap();
+        let target = Target {
+            locale: "zh_CN".into(),
+            store_number: "R683".into(),
+            store_title: "测试门店".into(),
+            part_number: "MJYE4CH/A".into(),
+            product_name: "测试商品".into(),
+            companion_part: None,
+            pickup_location: None,
+        };
+        let session = DirectCart::new(cn, &target, None).unwrap();
+        let page =
+            Url::parse("https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro/MJYE4CH/A").unwrap();
+        session.cookies.add(
+            "wait_room=ready; Domain=www.apple.com.cn; Path=/shop/buy-iphone; Secure",
+            page.as_str(),
+        );
+        session.cookies.add(
+            "other=skip; Domain=www.apple.com.cn; Path=/shop/buy-mac; Secure",
+            "https://www.apple.com.cn/shop/buy-mac/example",
+        );
+        let AddOutcome::Stop { reason, cookies } = session.stop("等待验证".into(), Some(&page))
+        else {
+            panic!("加车前停止时必须保留商品页会话");
+        };
+        assert_eq!(reason, "等待验证");
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookies[0].name, "wait_room");
+        assert_eq!(cookies[0].path, "/shop/buy-iphone");
     }
 
     #[tokio::test]
@@ -593,7 +667,7 @@ mod tests {
         match session.add(|| true).await.unwrap() {
             AddOutcome::Confirmed(_) => println!("Apple confirmed the add URL"),
             AddOutcome::Cancelled => panic!("live diagnostic unexpectedly cancelled"),
-            AddOutcome::Stop(reason) => panic!("Apple stopped before add: {reason}"),
+            AddOutcome::Stop { reason, .. } => panic!("Apple stopped before add: {reason}"),
             AddOutcome::Uncertain { reason, .. } => panic!("Apple did not confirm add: {reason}"),
         }
     }

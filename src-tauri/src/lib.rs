@@ -596,6 +596,19 @@ async fn open_direct_bag_browser(
     .map_err(|err| format!("浏览器购物袋交接中断：{err}"))?
 }
 
+async fn open_direct_product_browser(
+    app: &AppHandle,
+    url: String,
+    cookies: Vec<browser_bot::SessionCookie>,
+) -> Result<(), String> {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        browser_bot::open_direct_product(&app, &url, &cookies, None)
+    })
+    .await
+    .map_err(|err| format!("浏览器商品页交接中断：{err}"))?
+}
+
 async fn open_auto_add(
     app: &AppHandle,
     gate: &mut AutoOpenBag,
@@ -682,13 +695,21 @@ async fn open_auto_add(
                                 api_stop_retries = true;
                                 return Err("任务已停止；本轮不会继续直连加车或自动结账。".into());
                             }
-                            direct_cart::AddOutcome::Stop(reason) => {
+                            direct_cart::AddOutcome::Stop { reason, cookies } => {
                                 api_stop_retries = true;
-                                let inspection =
-                                    open_task_browser(app, session.product_page().clone()).await;
+                                let inspection = if cookies.is_empty() {
+                                    open_task_browser(app, session.product_page().clone()).await
+                                } else {
+                                    open_direct_product_browser(
+                                        app,
+                                        session.product_page().to_string(),
+                                        cookies,
+                                    )
+                                    .await
+                                };
                                 return Err(match inspection {
                                     Ok(()) => format!("{reason}；已在独立浏览器打开商品页供你处理验证或等待放行。本轮不会自动重试加车。"),
-                                    Err(err) => format!("{reason}；无法打开独立浏览器商品页：{err}。本轮不会自动重试加车。"),
+                                    Err(err) => format!("{reason}；无法交接独立浏览器商品页：{err}。本轮不会自动重试加车。"),
                                 });
                             }
                             direct_cart::AddOutcome::Uncertain { reason, cookies } => {
