@@ -425,6 +425,7 @@ export default function App() {
 
   // 门店可以一次选好几家：同城门店合并成一次请求之后，多选不增加请求量。
   const [storeNumbers, setStoreNumbers] = useState<string[]>([]);
+  const [manualSku, setManualSku] = useState("");
   // 非 iPhone 品类直接选一个完整型号。
   const [partNumber, setPartNumber] = useState("");
   // iPhone 按机型 → 容量 → 颜色三级选择，三级都可多选：发售当晚常见的是
@@ -567,6 +568,8 @@ export default function App() {
   }, [ui.rows]);
 
   const canAdd = storeNumbers.length > 0 && selectedProducts.length > 0;
+  const normalizedManualSku = manualSku.trim().toUpperCase();
+  const canAddManualSku = storeNumbers.length > 0 && /^[A-Z0-9]{4,}\/[A-Z]$/.test(normalizedManualSku);
 
   async function onAdd() {
     if (!canAdd) return;
@@ -597,6 +600,31 @@ export default function App() {
     await setTargets([...targets, ...added]);
     // 只清型号，门店留着：接着给同一批门店加下一个型号是最常见的操作。
     resetProductSelection();
+  }
+
+  async function onAddManualSku() {
+    if (!canAddManualSku) return;
+    const existing = new Set(targets.map(targetKey));
+    const product = ui.products.find((item) => item.partNumber.toUpperCase() === normalizedManualSku);
+    const added: Target[] = [];
+    for (const number of storeNumbers) {
+      const store = ui.stores.find((item) => item.number === number);
+      if (!store) continue;
+      const target: Target = {
+        locale: ui.settings.locale,
+        storeNumber: store.number,
+        storeTitle: store.title,
+        partNumber: normalizedManualSku,
+        productName: product?.title ?? `SKU ${normalizedManualSku}`,
+        ...(product?.companionPart ? { companionPart: product.companionPart } : {}),
+      };
+      if (existing.has(targetKey(target))) continue;
+      existing.add(targetKey(target));
+      added.push(target);
+    }
+    if (added.length === 0) return;
+    await setTargets([...targets, ...added]);
+    setManualSku("");
   }
 
   async function onRemove(t: Target) {
@@ -862,6 +890,23 @@ export default function App() {
             <Button className="col-span-2 w-full" onClick={() => void onAdd()} disabled={!canAdd}>
               <Plus /> 添加到监控
             </Button>
+            <div className="col-span-2 grid gap-1.5 border-t pt-3">
+              <Label htmlFor="manual-sku">手动 SKU · 新品尚未入目录时使用</Label>
+              <div className="flex gap-2">
+                <Input
+                  id="manual-sku"
+                  value={manualSku}
+                  onChange={(event) => setManualSku(event.target.value)}
+                  placeholder="例如 MJT74CH/A"
+                  spellCheck={false}
+                  className="min-w-0"
+                />
+                <Button variant="outline" onClick={() => void onAddManualSku()} disabled={!canAddManualSku}>
+                  添加 SKU
+                </Button>
+              </div>
+              <p className="text-muted-foreground text-xs">沿用上方选中的门店；添加后在任务页选择 API 或 Chrome 加车。</p>
+            </div>
             {selectedProducts.length > 1 && (
               // 多选时把要加的规模点明：三级各勾几项之后，组合数并不直观。
               <span

@@ -104,6 +104,9 @@ function renderApp() {
     choice: (placeholder) => control((element) => element?.props?.placeholder === placeholder),
     addButton: () => control((element) => element.type === "Button" &&
       Array.isArray(element.props.children) && element.props.children.includes(" 添加到监控")),
+    manualSku: () => control((element) => element?.props?.id === "manual-sku"),
+    addManualSku: () => control((element) => element?.type === "Button" &&
+      element.props.children === "添加 SKU"),
     scaleHint: () => control((element) => element.type === "span" &&
       Array.isArray(element.props.children) && element.props.children.includes(" 个型号 × ")),
     tab: (name) => control((element) => element?.props?.id === `workspace-tab-${name}`),
@@ -202,6 +205,21 @@ test("each task saves release time and retry delay independently", async () => {
   app.taskRetry(key).onBlur({ target: { value: "500" } });
   assert.equal(app.saved.length, saves);
   assert.match(app.alerts().join(" "), /1000–60000/);
+});
+
+test("a new SKU can be added for the selected store before it enters the catalog", async () => {
+  const app = renderApp();
+  app.state.stores = [{ number: "R683", title: "环球港" }];
+  app.choice("选择自提门店").onChange(["R683"]);
+  app.manualSku().onChange({ target: { value: " mjt74ch/a " } });
+  assert.equal(app.addManualSku().disabled, false);
+  app.addManualSku().onClick();
+  await new Promise(setImmediate);
+  assert.deepEqual(app.addedTargets.at(-1), [{
+    locale: "zh_CN", storeNumber: "R683", storeTitle: "环球港",
+    partNumber: "MJT74CH/A", productName: "SKU MJT74CH/A",
+  }]);
+  assert.equal(app.manualSku().value, "");
 });
 
 test("workspace tabs support keyboard navigation and one tab stop", () => {
