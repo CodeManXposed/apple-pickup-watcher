@@ -24,7 +24,8 @@ pub const EVENT_CHANNEL: &str = "watcher://payment-link";
 pub const STATUS_CHANNEL: &str = "watcher://bot-status";
 const TOKEN_FILE: &str = "extension-pairing-code";
 const SESSION_FILE: &str = "checkout-session.v1.json";
-const SESSION_TTL_SECONDS: u64 = 60 * 60;
+const CHECKOUT_SESSION_TTL_SECONDS: u64 = 4 * 60 * 60;
+const PAYMENT_SESSION_TTL_SECONDS: u64 = 60 * 60;
 const MAX_HEADER: usize = 16 << 10;
 const MAX_BODY: usize = 8 << 10;
 
@@ -430,7 +431,18 @@ fn read_session(path: &Path, time: u64) -> Result<BridgeSession, String> {
     if status.stage == "paymentLink" && session.latest.is_none() {
         return Err("结账会话缺少付款链接".into());
     }
-    if status.updated_at > time || time - status.updated_at > SESSION_TTL_SECONDS {
+    // 尚在 Apple 验证中的活动任务可等待较久，但重启后绝不恢复自动操作。
+    // 已提交订单、已收到付款链接或明确暂停的任务继续使用较短期限。
+    let ttl = if status.automation_active
+        && !matches!(
+            status.stage.as_str(),
+            "orderSubmitted" | "paymentLink" | "failed"
+        ) {
+        CHECKOUT_SESSION_TTL_SECONDS
+    } else {
+        PAYMENT_SESSION_TTL_SECONDS
+    };
+    if status.updated_at > time || time - status.updated_at > ttl {
         return Ok(BridgeSession::default());
     }
     if let Some(link) = &session.latest
@@ -439,7 +451,7 @@ fn read_session(path: &Path, time: u64) -> Result<BridgeSession, String> {
             || !matches!(link.kind.as_str(), "qr" | "cashier")
             || !valid_alipay_url(&link.url)
             || link.received_at > time
-            || time - link.received_at > SESSION_TTL_SECONDS)
+            || time - link.received_at > PAYMENT_SESSION_TTL_SECONDS)
     {
         return Err("结账会话付款链接无效".into());
     }
@@ -1024,7 +1036,7 @@ mod tests {
         BridgeSession, DiscordDelivery, IncomingLink, IncomingStatus, IncomingTask, PaymentBridge,
         PaymentLink, handle_connection, link_matches_task, load_session, now, read_request,
         read_session, respond, send_discord_link, valid_alipay_url, valid_origin,
-        valid_task_status,
+        valid_task_status, write_session,
     };
     use crate::AppState;
     use apw_core::apple::{AppleClient, ClientConfig};
@@ -1335,6 +1347,9 @@ mod tests {
         bridge
             .advance_task("review", "MJYE4CH/A", "R683", &task.task_id)
             .unwrap();
+        let mut saved = bridge.session.read().unwrap().clone();
+        saved.status.as_mut().unwrap().updated_at = now().saturating_sub(2 * 60 * 60);
+        write_session(&path, &saved).unwrap();
 
         let resumed = persistent_bridge(&path, read_session(&path, now()).unwrap());
         assert!(!resumed.is_active_task(&IncomingTask {
@@ -1389,6 +1404,29 @@ mod tests {
         let path = dir.path().join("checkout-session.v1.json");
         let bridge = persistent_bridge(&path, BridgeSession::default());
         bridge.start_task("MJYE4CH/A", "R683").unwrap();
+        assert!(
+            read_session(&path, now() + 60 * 60 + 1)
+                .unwrap()
+                .status
+                .is_some()
+        );
+        assert!(
+            read_session(&path, now() + 4 * 60 * 60 + 1)
+                .unwrap()
+                .status
+                .is_none()
+        );
+        bridge.pause_active_task().unwrap();
+        assert!(
+            read_session(&path, now() + 60 * 60 + 1)
+                .unwrap()
+                .status
+                .is_none()
+        );
+        let task = bridge.start_task("MJYE4CH/A", "R683").unwrap();
+        bridge
+            .advance_task("orderSubmitted", "MJYE4CH/A", "R683", &task.task_id)
+            .unwrap();
         assert!(
             read_session(&path, now() + 60 * 60 + 1)
                 .unwrap()
