@@ -1035,6 +1035,25 @@ fn validate_handoff_url(url: &str, bag: bool) -> Result<reqwest::Url, String> {
     Ok(parsed)
 }
 
+fn validate_release_handoff_tab(current: &str, destination: &reqwest::Url) -> Result<(), String> {
+    let current = reqwest::Url::parse(current).map_err(|_| "发售标签页地址无效".to_owned())?;
+    let prefix = destination
+        .path()
+        .split_once("/shop/")
+        .map(|(region, _)| format!("{region}/shop/"))
+        .ok_or("Apple 商店地区路径无效")?;
+    if current.scheme() != "https"
+        || current.host_str() != destination.host_str()
+        || current.port().is_some()
+        || !current.username().is_empty()
+        || current.password().is_some()
+        || !current.path().starts_with(&prefix)
+    {
+        return Err("发售标签页不是当前地区的 Apple 商店页面".into());
+    }
+    Ok(())
+}
+
 fn open_apple_page_with_cookies(
     app: &AppHandle,
     url: &str,
@@ -1066,44 +1085,51 @@ fn open_apple_page_with_cookies(
     if cookie_params.is_empty() {
         return Err("直连会话没有适用于当前 Apple 商店的 Cookie".into());
     }
-    cdp_call(
-        &mut browser,
-        2,
-        "Storage.setCookies",
-        serde_json::json!({"cookies": cookie_params}),
-    )?;
-    if let Some(target_id) = target_id {
+    // 先确认原发售页仍属于本次地区，再修改整个独立浏览器的 Cookie。
+    let session = if let Some(target_id) = target_id {
         let target = cdp_call(
             &mut browser,
-            3,
+            2,
             "Target.getTargetInfo",
             serde_json::json!({"targetId": target_id}),
         )?;
         let current = target["targetInfo"]["url"]
             .as_str()
             .ok_or("发售标签页已关闭")?;
-        let current = reqwest::Url::parse(current).map_err(|_| "发售标签页地址无效".to_owned())?;
-        if current.host_str() != parsed.host_str() || !current.path().contains("/shop/") {
-            return Err("发售标签页不是当前 Apple 商店页面".into());
-        }
+        validate_release_handoff_tab(current, &parsed)?;
         let attached = cdp_call(
             &mut browser,
-            4,
+            3,
             "Target.attachToTarget",
             serde_json::json!({"targetId": target_id, "flatten": true}),
         )?;
-        let session = attached["sessionId"].as_str().ok_or("无法连接发售标签页")?;
+        Some(
+            attached["sessionId"]
+                .as_str()
+                .ok_or("无法连接发售标签页")?
+                .to_owned(),
+        )
+    } else {
+        None
+    };
+    cdp_call(
+        &mut browser,
+        4,
+        "Storage.setCookies",
+        serde_json::json!({"cookies": cookie_params}),
+    )?;
+    if let Some(session) = session {
         cdp_call_with_session(
             &mut browser,
             5,
             "Page.navigate",
             serde_json::json!({"url": url}),
-            Some(session),
+            Some(&session),
         )?;
     } else {
         let created = cdp_call(
             &mut browser,
-            3,
+            5,
             "Target.createTarget",
             serde_json::json!({"url": url}),
         )?;
@@ -1348,6 +1374,41 @@ mod tests {
         assert!(validate_handoff_url("https://www.apple.com.cn/shop/bag", false).is_err());
         assert!(validate_handoff_url("https://user@www.apple.com.cn/shop/bag", true).is_err());
         assert!(validate_handoff_url("https://example.com/shop/bag", true).is_err());
+    }
+
+    #[test]
+    fn release_handoff_requires_the_original_tab_in_the_same_region() {
+        let destination =
+            validate_handoff_url("https://www.apple.com/hk-zh/shop/bag", true).unwrap();
+        assert!(
+            validate_release_handoff_tab(
+                "https://www.apple.com/hk-zh/shop/buy-iphone/iphone?step=select",
+                &destination
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_release_handoff_tab(
+                "https://www.apple.com/jp/shop/buy-iphone/iphone",
+                &destination
+            )
+            .is_err()
+        );
+        assert!(
+            validate_release_handoff_tab(
+                "https://www.apple.com/foo/hk-zh/shop/buy-iphone/iphone",
+                &destination
+            )
+            .is_err()
+        );
+        assert!(
+            validate_release_handoff_tab(
+                "https://www.apple.com.cn/shop/buy-iphone/iphone",
+                &destination
+            )
+            .is_err()
+        );
+        assert!(validate_release_handoff_tab("chrome://newtab", &destination).is_err());
     }
 
     #[test]
