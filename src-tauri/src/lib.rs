@@ -778,7 +778,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                 tauri::Error::AssetNotFound("默认窗口图标缺失，无法建立托盘".into())
             })?,
         )
-        .tooltip("Apple Pickup Watcher")
+        .tooltip("Apple Bot")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {

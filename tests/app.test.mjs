@@ -103,7 +103,7 @@ function renderApp() {
     hasAddPush: () => all(isAddPush).length > 0,
     choice: (placeholder) => control((element) => element?.props?.placeholder === placeholder),
     addButton: () => control((element) => element.type === "Button" &&
-      Array.isArray(element.props.children) && element.props.children.includes(" 添加")),
+      Array.isArray(element.props.children) && element.props.children.includes(" 添加到监控")),
     scaleHint: () => control((element) => element.type === "span" &&
       Array.isArray(element.props.children) && element.props.children.includes(" 个型号 × ")),
     tab: (name) => control((element) => element?.props?.id === `workspace-tab-${name}`),

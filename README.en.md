@@ -1,9 +1,9 @@
 <!-- markdownlint-disable MD033 MD041 -->
 <div align="center">
 
-<img src="assets/icon.png" alt="Apple Pickup Watcher icon" width="112" height="112">
+<img src="assets/icon.png" alt="Apple Bot icon" width="112" height="112">
 
-# Apple Pickup Watcher
+# Apple Bot
 
 > This fork adds Discord webhook alerts. Installer links below still point to ENCHIGO's upstream builds, which do not include this change; build this fork from source for Discord support.
 
@@ -30,7 +30,7 @@ Available as a desktop app, the `apw` command line tool, and an agent skill. Fre
 <br>
 
 <p align="center">
-  <img src="assets/screenshot.png" alt="Apple Pickup Watcher desktop app: the watch list shows each store and model with its in stock / out of stock / unknown status and the time of the last check" width="900">
+  <img src="assets/screenshot.png" alt="Apple Bot desktop app: the watch list shows each store and model with its in stock / out of stock / unknown status and the time of the last check" width="900">
 </p>
 
 ## What it does
@@ -60,7 +60,7 @@ Grab the installer for your platform from [Releases](https://github.com/ENCHIGO/
 
 ```bash
 # macOS: clear the download quarantine flag for this one app only
-xattr -cr "/Applications/Apple Pickup Watcher.app"
+xattr -cr "/Applications/Apple Bot.app"
 ```
 
 Installation details, Bark, Feishu and Discord push, and the config file location are in the [desktop guide](docs/desktop.md).

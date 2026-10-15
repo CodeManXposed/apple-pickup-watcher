@@ -3,8 +3,7 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* 主题变量。深色是这类工具的常态使用场景（长时间挂着盯库存），
-   所以两套配色都要认真配，不能只把浅色反一下了事。 */
+/* 主题变量；工作区固定使用 .dark，基础变量留给组件默认样式。 */
 :root {
   --radius: 0.625rem;
   /* 页面底色比卡片略灰：分区卡片要有一层底才「浮」得起来，纯白上叠纯白只剩一圈线。 */
@@ -34,27 +33,28 @@
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.269 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.371 0 0);
-  --accent-foreground: oklch(0.985 0 0);
+  color-scheme: dark;
+  --background: oklch(0.16 0.018 258);
+  --foreground: oklch(0.95 0.012 250);
+  --card: oklch(0.205 0.021 257);
+  --card-foreground: oklch(0.95 0.012 250);
+  --popover: oklch(0.235 0.024 257);
+  --popover-foreground: oklch(0.95 0.012 250);
+  --primary: oklch(0.72 0.15 245);
+  --primary-foreground: oklch(0.145 0.025 260);
+  --secondary: oklch(0.265 0.028 255);
+  --secondary-foreground: oklch(0.94 0.012 250);
+  --muted: oklch(0.25 0.023 257);
+  --muted-foreground: oklch(0.69 0.025 255);
+  --accent: oklch(0.3 0.043 252);
+  --accent-foreground: oklch(0.96 0.012 250);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 12%);
-  --input: oklch(1 0 0 / 16%);
-  --ring: oklch(0.556 0 0);
-  --in-stock: oklch(0.77 0.2 148);
-  --unknown: oklch(0.71 0.19 25);
-  --out-of-stock: oklch(0.708 0 0);
+  --border: oklch(0.43 0.035 255 / 48%);
+  --input: oklch(0.42 0.035 255 / 44%);
+  --ring: oklch(0.72 0.15 245);
+  --in-stock: oklch(0.79 0.19 151);
+  --unknown: oklch(0.78 0.16 55);
+  --out-of-stock: oklch(0.66 0.02 255);
 }
 
 @theme inline {
@@ -100,5 +100,73 @@
     @apply bg-background text-foreground;
     /* 桌面应用不该能选中界面文字，那是网页的行为。日志区单独放开。 */
     user-select: none;
+  }
+}
+
+@layer components {
+  .app-shell {
+    background:
+      radial-gradient(ellipse 70% 42% at 85% -18%, oklch(0.34 0.09 248 / 22%), transparent 75%),
+      var(--background);
+  }
+
+  .app-header {
+    background: linear-gradient(180deg, oklch(0.2 0.026 257), oklch(0.185 0.021 257));
+    border-bottom: 1px solid var(--border);
+  }
+
+  .app-nav {
+    background: oklch(0.185 0.021 257 / 75%);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .workspace-tab[data-active="true"] {
+    background: linear-gradient(180deg, oklch(0.29 0.047 250 / 80%), oklch(0.24 0.037 252 / 70%));
+    box-shadow: inset 0 -2px var(--primary);
+  }
+
+  .workspace-panel {
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .monitor-workspace {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(340px, 390px);
+    grid-template-rows: auto auto minmax(0, 1fr);
+    gap: 14px;
+  }
+
+  .monitor-heading { grid-column: 1 / -1; }
+  .monitor-builder { grid-column: 2; grid-row: 2 / 4; }
+  .monitor-builder > section, .tasks-side > section { flex-shrink: 0; }
+  .monitor-overview { grid-column: 1; grid-row: 2; }
+  .monitor-list { grid-column: 1; grid-row: 3; }
+
+  .tasks-workspace {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
+    grid-template-rows: auto auto minmax(0, 1fr) 132px;
+    gap: 14px;
+  }
+
+  .tasks-heading, .tasks-control, .tasks-log { grid-column: 1 / -1; }
+  .tasks-list { grid-column: 1; grid-row: 3; }
+  .tasks-side { grid-column: 2; grid-row: 3; }
+  .tasks-log { grid-row: 4; }
+
+  @media (max-width: 1050px) {
+    .monitor-workspace { grid-template-columns: minmax(0, 1fr) 340px; }
+    .tasks-workspace { grid-template-columns: minmax(0, 1fr) 300px; }
+  }
+
+  @media (max-width: 850px) {
+    .monitor-workspace, .tasks-workspace {
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+    }
+    .monitor-builder, .tasks-side { overflow: visible; }
+    .monitor-list, .tasks-list { min-height: 280px; }
   }
 }

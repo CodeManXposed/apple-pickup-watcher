@@ -170,21 +170,21 @@ function Panel({
     </>
   );
   return (
-    <section className="bg-card text-card-foreground rounded-xl border shadow-xs">
+    <section className="bg-card text-card-foreground overflow-hidden rounded-xl border shadow-sm shadow-black/10">
       {onToggle !== undefined ? (
         <button
           type="button"
           aria-expanded={open}
           onClick={onToggle}
           className={cn(
-            "hover:bg-muted/40 flex w-full items-center gap-3 px-4 py-2 text-left",
+            "hover:bg-muted/40 flex w-full items-center gap-3 px-4 py-3 text-left",
             open ? "rounded-t-xl" : "rounded-xl",
           )}
         >
           {heading}
         </button>
       ) : (
-        <div className="flex items-center gap-3 px-4 py-2">{heading}</div>
+        <div className="flex items-center gap-3 px-4 py-3">{heading}</div>
       )}
       {open && <div className="grid gap-2.5 border-t px-4 pt-3 pb-4">{children}</div>}
     </section>
@@ -206,12 +206,12 @@ function readWorkspaceTab(): WorkspaceTab {
   return "monitor";
 }
 
-/** 上次是展开还是收起。读不到（首次启动、无 localStorage）按展开。 */
+/** 运行设置保留用户上次的展开状态；首次启动优先展示库存列表。 */
 function readSettingsOpen(): boolean {
   try {
-    return localStorage.getItem(SETTINGS_OPEN_KEY) !== "0";
+    return localStorage.getItem(SETTINGS_OPEN_KEY) === "1";
   } catch {
-    return true;
+    return false;
   }
 }
 
@@ -231,7 +231,7 @@ function settingsSummary(s: Settings): string {
 /** 运行状态。一个会呼吸的点比一行灰字更像「它还活着」。 */
 function RunState({ running }: { running: boolean }) {
   return (
-    <span className="text-muted-foreground flex items-center gap-2 text-sm">
+    <span className={cn("inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium", running ? "border-in-stock/25 bg-in-stock/10 text-in-stock" : "border-border bg-muted/50 text-muted-foreground")}>
       <span className="relative flex size-2">
         {running && (
           <span className="bg-in-stock/60 absolute inline-flex size-full animate-ping rounded-full [animation-duration:2.4s]" />
@@ -259,11 +259,11 @@ function Stat({
   tone?: "inStock" | "unknown";
 }) {
   return (
-    <span className="bg-card inline-flex items-baseline gap-1.5 rounded-md border px-2.5 py-1 text-sm shadow-xs">
-      <span className="text-muted-foreground text-xs">{label}</span>
+    <span className="bg-card inline-flex min-w-25 items-baseline justify-between gap-3 rounded-lg border px-3 py-2 text-sm">
+      <span className="text-muted-foreground text-xs font-medium">{label}</span>
       <span
         className={cn(
-          "font-semibold tabular-nums",
+          "text-lg font-semibold leading-none tabular-nums",
           value > 0 && tone === "inStock" && "text-in-stock",
           value > 0 && tone === "unknown" && "text-unknown",
         )}
@@ -545,23 +545,24 @@ export default function App() {
 
   return (
     <TooltipProvider delayDuration={200}>
-      <div className="mx-auto flex h-screen max-w-6xl flex-col gap-3 p-5">
-        <header className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-xl font-semibold tracking-tight">Apple Pickup Watcher</h1>
-            <p className="text-muted-foreground text-sm">
-              盯 Apple 直营店的到店取货库存，有货立刻提醒
-            </p>
+      <div className="app-shell mx-auto flex h-screen max-w-[1500px] flex-col gap-3 overflow-hidden p-4">
+        <header className="app-header flex shrink-0 items-center justify-between gap-4 rounded-xl border px-5 py-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="border-primary/30 bg-primary/10 text-primary flex size-10 shrink-0 items-center justify-center rounded-xl border"><Radar className="size-5" /></span>
+            <div className="min-w-0">
+              <p className="text-primary text-[10px] font-semibold tracking-[0.2em]">APPLE CONTROL DESK</p>
+              <h1 className="truncate text-lg font-semibold tracking-tight">Apple Bot</h1>
+            </div>
           </div>
           <div className="flex items-center gap-4">
             <RunState running={ui.running} />
             {ui.running ? (
-              <Button variant="secondary" onClick={() => void stopWatching()}>
+              <Button variant="secondary" className="min-w-28" onClick={() => void stopWatching()}>
                 <Pause /> 暂停
               </Button>
             ) : (
-              <Button aria-label={watchStarting ? "正在检查自动监控环境" : "开始监控"} onClick={() => void onStartWatching()} disabled={ui.rows.length === 0 || watchStarting || taskSaving}>
-                <Play /> {watchStarting ? "正在检查…" : "开始"}
+              <Button className="min-w-28" aria-label={watchStarting ? "正在检查自动监控环境" : "开始监控"} onClick={() => void onStartWatching()} disabled={ui.rows.length === 0 || watchStarting || taskSaving}>
+                <Play /> {watchStarting ? "正在检查…" : "开始监控"}
               </Button>
             )}
           </div>
@@ -577,7 +578,7 @@ export default function App() {
           </div>
         )}
 
-        <nav aria-label="工作区" className="grid w-full grid-cols-3 border-b" role="tablist">
+        <nav aria-label="工作区" className="app-nav flex shrink-0 items-center gap-1 rounded-lg border px-2" role="tablist">
           {([
             ["monitor", "监控", Radar],
             ["profile", "Profile", UserRound],
@@ -590,14 +591,15 @@ export default function App() {
               role="tab"
               aria-controls={`workspace-panel-${tab}`}
               aria-selected={activeTab === tab}
+              data-active={activeTab === tab}
               tabIndex={activeTab === tab ? 0 : -1}
               onClick={() => selectTab(tab)}
               onKeyDown={(event) => onTabKeyDown(event, tab)}
               className={cn(
-                "-mb-px flex min-w-0 items-center justify-center gap-2 border-b-2 px-3 py-3 text-sm font-medium transition-colors focus-visible:rounded-md focus-visible:outline-2 focus-visible:outline-offset-2",
+                "workspace-tab flex min-w-36 items-center justify-center gap-2 rounded-t-md px-4 py-3 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2",
                 activeTab === tab
-                  ? "border-primary text-foreground"
-                  : "text-muted-foreground hover:border-muted-foreground/40 hover:bg-muted/50 hover:text-foreground border-transparent",
+                  ? "text-foreground"
+                  : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
               )}
             >
               <Icon className="size-4" aria-hidden="true" />
@@ -665,21 +667,25 @@ export default function App() {
           id="workspace-panel-monitor"
           role="tabpanel"
           aria-labelledby="workspace-tab-monitor"
-          className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto"
+          className="workspace-panel monitor-workspace min-h-0 flex-1"
         >
-        <div className="shrink-0">
-          <h2 className="text-lg font-semibold">库存监控</h2>
-          <p className="text-muted-foreground text-xs">添加商品与门店，配置提醒，并查看每个目标的最新库存。</p>
+        <div className="monitor-heading flex items-end justify-between gap-3">
+          <div>
+            <p className="text-primary text-[10px] font-semibold tracking-[0.18em]">LIVE INVENTORY</p>
+            <h2 className="text-xl font-semibold tracking-tight">库存监控</h2>
+          </div>
+          <p className="text-muted-foreground text-xs">Apple 直营店 · 到店取货</p>
         </div>
+        <aside className="monitor-builder flex min-h-0 flex-col gap-3 overflow-y-auto pr-1" aria-label="监控配置">
         <Panel
           title="添加监控目标"
-          hint="不同品类、不同门店可以混着加；门店和 iPhone 的机型、容量、颜色都可多选，组合一次全部加入"
+          hint="门店和型号可多选"
         >
-          <div className="flex flex-wrap items-end gap-3">
-            <div className="grid gap-1.5">
+          <div className="grid grid-cols-2 gap-3">
+            <div className="grid min-w-0 gap-1.5">
               <Label>地区</Label>
               <Combobox
-                className="w-36"
+                className="w-full"
                 options={ui.regions.map((r) => ({ value: r.locale, label: r.title }))}
                 value={ui.settings.locale}
                 onChange={(locale) => {
@@ -694,10 +700,10 @@ export default function App() {
               />
             </div>
 
-            <div className="grid gap-1.5">
+            <div className="grid min-w-0 gap-1.5">
               <Label>品类</Label>
               <Combobox
-                className="w-36"
+                className="w-full"
                 options={ui.categories.map((c) => ({ value: c.value, label: c.title }))}
                 value={ui.category}
                 onChange={(value) => {
@@ -713,10 +719,10 @@ export default function App() {
               />
             </div>
 
-            <div className="grid gap-1.5">
+            <div className="col-span-2 grid min-w-0 gap-1.5">
               <Label>门店（可多选）</Label>
               <MultiCombobox
-                className="w-64"
+                className="w-full"
                 options={storeOptions}
                 values={storeNumbers}
                 onChange={setStoreNumbers}
@@ -729,13 +735,13 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex flex-wrap items-end gap-3">
+          <div className="grid grid-cols-2 items-end gap-3">
             {ui.category === "iphone" ? (
               <>
-                <div className="grid gap-1.5">
+                <div className="col-span-2 grid min-w-0 gap-1.5">
                   <Label>机型（可多选）</Label>
                   <MultiCombobox
-                    className="w-48"
+                    className="w-full"
                     options={iphoneFamilyOptions}
                     values={families}
                     onChange={onFamiliesChange}
@@ -747,10 +753,10 @@ export default function App() {
                   />
                 </div>
 
-                <div className="grid gap-1.5">
+                <div className="grid min-w-0 gap-1.5">
                   <Label>容量（可多选）</Label>
                   <MultiCombobox
-                    className="w-36"
+                    className="w-full"
                     options={iphoneCapacityOptions}
                     values={capacities}
                     onChange={onCapacitiesChange}
@@ -762,10 +768,10 @@ export default function App() {
                   />
                 </div>
 
-                <div className="grid gap-1.5">
+                <div className="grid min-w-0 gap-1.5">
                   <Label>颜色（可多选）</Label>
                   <MultiCombobox
-                    className="w-40"
+                    className="w-full"
                     options={iphoneColorOptions}
                     values={colors}
                     onChange={setColors}
@@ -778,10 +784,10 @@ export default function App() {
                 </div>
               </>
             ) : (
-              <div className="grid gap-1.5">
+              <div className="col-span-2 grid min-w-0 gap-1.5">
                 <Label>型号</Label>
                 <Combobox
-                  className="w-96"
+                  className="w-full"
                   options={productOptions}
                   value={partNumber}
                   onChange={setPartNumber}
@@ -793,13 +799,13 @@ export default function App() {
               </div>
             )}
 
-            <Button variant="secondary" onClick={() => void onAdd()} disabled={!canAdd}>
-              <Plus /> 添加
+            <Button className="col-span-2 w-full" onClick={() => void onAdd()} disabled={!canAdd}>
+              <Plus /> 添加到监控
             </Button>
             {selectedProducts.length > 1 && (
               // 多选时把要加的规模点明：三级各勾几项之后，组合数并不直观。
               <span
-                className="text-muted-foreground pb-2 text-sm"
+                className="text-muted-foreground col-span-2 text-xs"
                 title={selectedProducts.map((p) => p.title).join("、")}
               >
                 {selectedProducts.length} 个型号 × {storeNumbers.length} 家门店
@@ -811,6 +817,7 @@ export default function App() {
                 <Button
                   variant="ghost"
                   size="icon"
+                  className="col-start-2 justify-self-end"
                   aria-label="从 Apple 官网更新当前品类的型号列表"
                   disabled={ui.refreshing}
                   onClick={() => void refreshProducts()}
@@ -833,8 +840,8 @@ export default function App() {
         >
           {/* 两栏：左边是查询与本机提醒，右边是推送地址。推送地址一行一个会占好几行，
               和别的设置叠成一列的话，默认窗口高度下监控列表会被挤得看不见。 */}
-          <div className="flex flex-wrap items-start gap-x-8 gap-y-4">
-            <div className="grid min-w-80 grow-[2] basis-80 gap-3">
+          <div className="grid min-w-0 gap-4">
+            <div className="grid min-w-0 gap-3">
               <div className="grid gap-1.5">
                 {/* 标题行和右栏「推送地址」一样高，两栏的输入框才能对齐。 */}
                 <div className="flex h-3.5 items-center gap-x-2">
@@ -941,7 +948,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className="grid min-w-96 grow-[3] basis-96 gap-1.5">
+            <div className="grid min-w-0 gap-1.5">
               {/* 标题行和左栏的标签一样高，两栏的第一行输入框才能对齐。 */}
               <div className="flex h-3.5 items-center gap-x-2">
                 <Label htmlFor="push-0" className="shrink-0 whitespace-nowrap">
@@ -1016,8 +1023,9 @@ export default function App() {
             </div>
           </div>
         </Panel>
+        </aside>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="monitor-overview flex flex-wrap items-center gap-2">
           <Stat label="监控" value={ui.rows.length} />
           <Stat label="有货" value={summary.inStock} tone="inStock" />
           <Stat label="无货" value={summary.outOfStock} />
@@ -1034,8 +1042,12 @@ export default function App() {
           )}
         </div>
 
-        <section className="bg-card min-h-72 flex-1 overflow-hidden rounded-xl border shadow-xs">
-          <ScrollArea className="h-full">
+        <section className="monitor-list bg-card flex min-h-0 flex-col overflow-hidden rounded-xl border shadow-sm shadow-black/10">
+          <div className="flex shrink-0 items-center justify-between border-b px-4 py-3">
+            <h3 className="text-sm font-semibold">监控目标</h3>
+            <span className="text-muted-foreground text-xs tabular-nums">{ui.rows.length} 个目标</span>
+          </div>
+          <ScrollArea className="min-h-0 flex-1">
             <Table>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
@@ -1101,51 +1113,62 @@ export default function App() {
             id="workspace-panel-profile"
             role="tabpanel"
             aria-labelledby="workspace-tab-profile"
-            className="min-h-0 flex-1 overflow-y-auto"
+            className="workspace-panel min-h-0 flex-1 overflow-y-auto pr-1"
           >
-            <div className="mb-3">
-              <h2 className="text-lg font-semibold">Profile</h2>
-              <p className="text-muted-foreground text-xs">管理独立浏览器里的取货人、配送资料与下单上限。</p>
+            <div className="mb-4 flex items-end justify-between gap-3">
+              <div>
+                <p className="text-primary text-[10px] font-semibold tracking-[0.18em]">CHECKOUT IDENTITY</p>
+                <h2 className="text-xl font-semibold tracking-tight">Profile</h2>
+              </div>
+              <p className="text-muted-foreground text-xs">独立 Chrome · 本机保存</p>
             </div>
-            <div className="grid gap-4 pb-5 md:grid-cols-2">
-              <section className="bg-card rounded-xl border p-5 shadow-xs md:col-span-2">
-                <h3 className="font-semibold">结账资料设置</h3>
-                <p className="text-muted-foreground mt-1 text-sm">
-                  取货人和配送资料保存在独立 Chrome 的扩展中。在扩展的「结账资料设置」里编辑，资料不会写入桌面应用的监控配置。
-                </p>
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <Button disabled={browserPreparing} onClick={() => void onPrepareBrowser()}>
-                    {browserPreparing ? "正在准备…" : "准备独立浏览器"}
-                  </Button>
-                  <Button variant="secondary" disabled={browserPreparing} onClick={() => void openBotBrowser().then(setProfileFeedback)}>打开 Profile 编辑器</Button>
-                  <Button variant="outline" onClick={() => void copyBridgePairingCode().then(setProfileFeedback)}>复制扩展连接码</Button>
-                  <Button variant="ghost" onClick={() => void openExtensionFolder()}>查看扩展目录</Button>
+            <div className="grid gap-4 pb-5 lg:grid-cols-3">
+              <section className="bg-card border-primary/25 relative overflow-hidden rounded-xl border p-6 shadow-lg shadow-black/10 lg:col-span-3">
+                <div className="bg-primary/10 pointer-events-none absolute -top-24 -right-12 size-72 rounded-full blur-3xl" />
+                <div className="relative grid gap-6 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+                  <div>
+                    <p className="text-primary mb-2 text-xs font-semibold tracking-wide">结账资料中心</p>
+                    <h3 className="text-2xl font-semibold tracking-tight">准备好你的取货和配送资料</h3>
+                    <p className="text-muted-foreground mt-2 max-w-2xl text-sm leading-6">
+                      资料保存在独立浏览器的扩展中。监控命中后，任务会使用这份 Profile 填写 Apple 结账表单。
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2 lg:max-w-80 lg:justify-end">
+                    <Button disabled={browserPreparing} onClick={() => void onPrepareBrowser()}>
+                      {browserPreparing ? "正在准备…" : "准备独立浏览器"}
+                    </Button>
+                    <Button variant="secondary" disabled={browserPreparing} onClick={() => void openBotBrowser().then(setProfileFeedback)}>打开 Profile 编辑器</Button>
+                  </div>
                 </div>
-                {profileFeedback && <p className="mt-3 text-sm" role="status" aria-live="polite">{profileFeedback}</p>}
-                <p className="text-muted-foreground mt-3 text-xs">
-                  编辑器会在独立 Chrome 中直接打开；将桌面连接码粘贴到表单并保存。资料只留在该浏览器的扩展存储中。
+                {profileFeedback && <p className="relative mt-4 text-sm" role="status" aria-live="polite">{profileFeedback}</p>}
+              </section>
+
+              <section className="bg-card rounded-xl border p-5 shadow-sm shadow-black/10">
+                <span className="text-primary text-xs font-semibold">01 / PICKUP</span>
+                <div className="mt-3 flex items-center gap-2"><UserRound className="text-primary size-4" /><h3 className="font-semibold">取货联系人</h3></div>
+                <p className="text-muted-foreground mt-2 text-sm leading-6">
+                  姓名、手机号和邮箱。证件后四位与短信验证仍在 Apple 页面完成。
                 </p>
               </section>
 
-              <section className="bg-card rounded-xl border p-5 shadow-xs">
-                <div className="flex items-center gap-2"><UserRound className="size-4" /><h2 className="font-semibold">取货联系人</h2></div>
-                <p className="text-muted-foreground mt-2 text-sm">
-                  在扩展中保存取货人的姓名、手机号和邮箱。姓名需与取货证件一致；Apple 要求的证件后四位和短信验证仍在浏览器页面处理。
+              <section className="bg-card rounded-xl border p-5 shadow-sm shadow-black/10">
+                <span className="text-primary text-xs font-semibold">02 / DELIVERY</span>
+                <div className="mt-3 flex items-center gap-2"><UserRound className="text-primary size-4" /><h3 className="font-semibold">配送收货资料</h3></div>
+                <p className="text-muted-foreground mt-2 text-sm leading-6">
+                  配送联系人、地址和邮编。无法确认的选项留给你在 Apple 页面选择。
                 </p>
               </section>
 
-              <section className="bg-card rounded-xl border p-5 shadow-xs">
-                <div className="flex items-center gap-2"><UserRound className="size-4" /><h2 className="font-semibold">配送收货资料</h2></div>
-                <p className="text-muted-foreground mt-2 text-sm">
-                  在同一扩展设置页分别保存配送联系人、地址和邮编。扩展只填写可识别的空白字段；无法确认的下拉选项需在 Apple 页面选择。
+              <section className="bg-card rounded-xl border p-5 shadow-sm shadow-black/10">
+                <span className="text-primary text-xs font-semibold">03 / SAFETY</span>
+                <h3 className="mt-3 font-semibold">下单上限与连接</h3>
+                <p className="text-muted-foreground mt-2 text-sm leading-6">
+                  扩展中设置自动下单开关与单笔金额上限。连接码用于关联当前桌面任务。
                 </p>
-              </section>
-
-              <section className="bg-card rounded-xl border p-5 shadow-xs md:col-span-2">
-                <h2 className="font-semibold">自动提交订单</h2>
-                <p className="text-muted-foreground mt-2 text-sm">
-                  自动下单开关和人民币单笔金额上限也在扩展设置页，默认关闭。启用后，扩展在结账过程中确认门店和支付宝，并在最终订单页核对商品、数量及金额；付款仍由你完成。
-                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button variant="outline" size="sm" onClick={() => void copyBridgePairingCode().then(setProfileFeedback)}>复制扩展连接码</Button>
+                  <Button variant="ghost" size="sm" onClick={() => void openExtensionFolder()}>查看扩展目录</Button>
+                </div>
               </section>
             </div>
           </main>
@@ -1156,13 +1179,16 @@ export default function App() {
             id="workspace-panel-tasks"
             role="tabpanel"
             aria-labelledby="workspace-tab-tasks"
-            className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto"
+            className="workspace-panel tasks-workspace min-h-0 flex-1"
           >
-            <div className="shrink-0">
-              <h2 className="text-lg font-semibold">任务</h2>
-              <p className="text-muted-foreground text-xs">控制自动加车，跟踪结账进度并获取支付宝付款链接。</p>
+            <div className="tasks-heading flex items-end justify-between gap-3">
+              <div>
+                <p className="text-primary text-[10px] font-semibold tracking-[0.18em]">AUTOMATION</p>
+                <h2 className="text-xl font-semibold tracking-tight">任务</h2>
+              </div>
+              <p className="text-muted-foreground text-xs">库存命中 → 加车 → 结账 → 支付宝</p>
             </div>
-            <section className="bg-card rounded-xl border p-4 shadow-xs">
+            <section className="tasks-control bg-card rounded-xl border px-4 py-3 shadow-sm shadow-black/10">
               <div className="flex flex-wrap items-center gap-3">
                 <Switch
                   id="autoadd"
@@ -1174,17 +1200,17 @@ export default function App() {
                 <Button variant="outline" size="sm" className="ml-auto" onClick={() => selectTab("profile")}>设置 Profile</Button>
               </div>
               {taskFeedback && <p role="alert" className="text-destructive mt-2 text-sm">{taskFeedback}</p>}
-              <p className="text-muted-foreground mt-2 text-sm">
-                启用自动加车和开始监控时会检查独立浏览器、扩展连接码和取货资料。每次监控最多为首个有货目标启动一项浏览器任务；其他目标继续监控并提醒。结账资料和自动下单上限在 Profile 页介绍的扩展设置中配置。
+              <p className="text-muted-foreground mt-2 text-xs">
+                首个有货目标启动浏览器任务；其他目标继续监控并提醒。启动时会检查浏览器和 Profile。
               </p>
             </section>
 
-            <section className="bg-card overflow-hidden rounded-xl border shadow-xs">
+            <section className="tasks-list bg-card flex min-h-0 flex-col overflow-hidden rounded-xl border shadow-sm shadow-black/10">
               <div className="border-b px-4 py-3">
                 <h2 className="font-semibold">任务队列</h2>
                 <p className="text-muted-foreground text-xs">监控目标是候选任务；每次运行最多启动首个命中项。</p>
               </div>
-              <ScrollArea className="max-h-64">
+              <ScrollArea className="min-h-0 flex-1">
                 <Table>
                   <TableHeader><TableRow>
                     <TableHead className="pl-4">商品</TableHead>
@@ -1218,6 +1244,7 @@ export default function App() {
               </ScrollArea>
             </section>
 
+        <div className="tasks-side flex min-h-0 flex-col gap-3 overflow-y-auto pr-1">
         {ui.botStatus && (
           <section className="bg-card shrink-0 rounded-xl border p-4 shadow-xs" aria-live="polite">
             <h2 className="font-semibold">最近自动结账任务</h2>
@@ -1253,9 +1280,11 @@ export default function App() {
             <p className="text-muted-foreground mt-1 text-sm">提交 Apple 订单并进入支付宝后，链接会显示在这里。</p>
           </section>
         )}
+        </div>
 
-        <section className="bg-card h-28 shrink-0 overflow-hidden rounded-xl border shadow-xs">
-          <ScrollArea className="h-full">
+        <section className="tasks-log bg-card flex min-h-0 flex-col overflow-hidden rounded-xl border shadow-sm shadow-black/10">
+          <div className="border-b px-4 py-2 text-xs font-semibold">运行日志</div>
+          <ScrollArea className="min-h-0 flex-1">
             <div className="p-3 font-mono text-xs leading-5 select-text">
               {ui.logs.length === 0 ? (
                 <p className="text-muted-foreground">日志会显示在这里。</p>

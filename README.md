@@ -1,9 +1,9 @@
 <!-- markdownlint-disable MD033 MD041 -->
 <div align="center">
 
-<img src="assets/icon.png" alt="Apple Pickup Watcher 图标" width="112" height="112">
+<img src="assets/icon.png" alt="Apple Bot 图标" width="112" height="112">
 
-# Apple Pickup Watcher
+# Apple Bot
 
 > 此 fork 新增 Discord webhook 推送。下方指向 ENCHIGO 的安装包仍是上游版本，不包含本分支功能；使用 Discord 推送请从本 fork 的源码构建。
 
@@ -30,7 +30,7 @@
 <br>
 
 <p align="center">
-  <img src="assets/screenshot.png" alt="Apple Pickup Watcher 桌面版截图：监控列表逐行显示门店、型号、有货 / 无货 / 未知状态与最后检查时间" width="900">
+  <img src="assets/screenshot.png" alt="Apple Bot 桌面版截图：监控列表逐行显示门店、型号、有货 / 无货 / 未知状态与最后检查时间" width="900">
 </p>
 
 ## 它做什么
@@ -62,7 +62,7 @@
 
 ```bash
 # macOS：清除下载隔离标记，只对这一个应用生效
-xattr -cr "/Applications/Apple Pickup Watcher.app"
+xattr -cr "/Applications/Apple Bot.app"
 ```
 
 安装细节、Bark、飞书与 Discord 推送、配置文件位置见 [桌面版指南](docs/desktop.md)。

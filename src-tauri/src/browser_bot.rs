@@ -200,8 +200,11 @@ fn legacy_extension_key(root: &Path) -> Result<Option<Vec<u8>>, String> {
                         .map_err(|e| format!("读取旧扩展清单失败：{e}"))?,
                 )
                 .map_err(|e| format!("旧扩展清单损坏：{e}"))?;
-                if manifest.get("name").and_then(Value::as_str) != Some("Apple Pickup Watcher") {
-                    return Err("Chrome 配置中的扩展路径与 Apple Pickup Watcher 不匹配".into());
+                if !matches!(
+                    manifest.get("name").and_then(Value::as_str),
+                    Some("Apple Pickup Watcher" | "Apple Bot")
+                ) {
+                    return Err("Chrome 配置中的扩展路径与 Apple Bot 不匹配".into());
                 }
                 match manifest.get("key").and_then(Value::as_str) {
                     Some(encoded) => base64::engine::general_purpose::STANDARD

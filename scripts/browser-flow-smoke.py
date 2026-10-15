@@ -298,7 +298,7 @@ async def run_browser(page_port, extension, profile, navigation_mode, payment_mo
                         worker = CDP(socket)
                         await worker.start()
                         await worker.call("Runtime.enable")
-                        if await worker.evaluate("chrome.runtime.getManifest().name") != "Apple Pickup Watcher":
+                        if await worker.evaluate("chrome.runtime.getManifest().name") != "Apple Bot":
                             continue
                         if await worker.evaluate("typeof FLOW_PREFIX !== 'undefined' ? FLOW_PREFIX : ''") != "apwCheckoutFlow:":
                             raise RuntimeError("unexpected extension service worker")
@@ -320,7 +320,7 @@ async def run_browser(page_port, extension, profile, navigation_mode, payment_mo
                 break
             await asyncio.sleep(0.1)
         if not worker_ready:
-            raise RuntimeError("Apple Pickup Watcher extension worker did not load")
+            raise RuntimeError("Apple Bot extension worker did not load")
 
         page = next(target for target in targets() if target["type"] == "page" and target["url"] == "about:blank")
         async with websockets.connect(page["webSocketDebuggerUrl"]) as socket:
