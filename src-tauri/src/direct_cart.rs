@@ -16,6 +16,11 @@ pub(crate) enum AddOutcome {
     Confirmed(Vec<SessionCookie>),
     /// 风控阻断或响应不足以确认购物袋状态；本轮停止以免重复加车。
     Stop(String),
+    /// 请求可能已被 Apple 执行；交出同一会话供人工核对，绝不自动重试或结账。
+    Uncertain {
+        reason: String,
+        cookies: Vec<SessionCookie>,
+    },
 }
 
 pub(crate) struct DirectCart {
@@ -102,6 +107,30 @@ fn accepted(url: &Url, part: &str) -> bool {
 }
 
 impl DirectCart {
+    fn session_cookies(&self) -> Vec<SessionCookie> {
+        let Some(host) = self.bag.host_str() else {
+            return Vec::new();
+        };
+        self.cookies
+            .matches(self.bag.as_str())
+            .map(|cookie| SessionCookie {
+                name: cookie.name().to_owned(),
+                value: cookie.value().to_owned(),
+                domain: cookie.domain().unwrap_or(host).to_owned(),
+                path: cookie.path().unwrap_or("/").to_owned(),
+                http_only: cookie.http_only(),
+                secure: cookie.secure(),
+            })
+            .collect()
+    }
+
+    fn uncertain(&self, reason: String) -> AddOutcome {
+        AddOutcome::Uncertain {
+            reason,
+            cookies: self.session_cookies(),
+        }
+    }
+
     pub(crate) fn new(
         region: &Region,
         target: &Target,
@@ -205,40 +234,30 @@ impl DirectCart {
             ));
         };
         let request = add_url(&canonical, &self.part, &token);
-        let response = self.get_following(request, Some(&canonical)).await?;
-        if !response.status().is_success() {
-            if matches!(response.status().as_u16(), 403 | 429 | 541) {
-                return Ok(AddOutcome::Stop(format!(
-                    "Apple 加车请求返回 HTTP {}，商品未确认进入购物袋；本轮不再直连重试",
-                    response.status()
-                )));
+        // 此请求会修改购物袋。只要开始发送，网络断开、重定向失败或服务器错误
+        // 都无法证明 Apple 没有完成加车；不能交给任务调度器再次提交。
+        let response = match self.get_following(request, Some(&canonical)).await {
+            Ok(response) => response,
+            Err(_) => {
+                return Ok(self.uncertain("Apple 加车请求结果不确定（连接或重定向失败）".into()));
             }
-            return Err(format!(
-                "Apple 加车请求返回 HTTP {}；商品尚未确认进入购物袋",
+        };
+        if !response.status().is_success() {
+            return Ok(self.uncertain(format!(
+                "Apple 加车请求返回 HTTP {}，商品未确认进入购物袋",
                 response.status()
-            ));
+            )));
         }
-        let final_url =
-            Url::parse(&response.uri().to_string()).map_err(|_| "Apple 加车响应地址无效")?;
+        let final_url = match Url::parse(&response.uri().to_string()) {
+            Ok(url) => url,
+            Err(_) => {
+                return Ok(self.uncertain("Apple 加车响应地址无法识别".into()));
+            }
+        };
         if final_url.host_str() != self.base.host_str() || !accepted(&final_url, &self.part) {
-            return Ok(AddOutcome::Stop(
-                "Apple 未返回目标 SKU 的加车成功页；请手动检查购物袋，本轮不会再次加车".into(),
-            ));
+            return Ok(self.uncertain("Apple 未返回目标 SKU 的加车成功页".into()));
         }
-        let host = self.bag.host_str().ok_or("Apple 购物袋缺少域名")?;
-        let cookies = self
-            .cookies
-            .matches(self.bag.as_str())
-            .map(|cookie| SessionCookie {
-                name: cookie.name().to_owned(),
-                value: cookie.value().to_owned(),
-                domain: cookie.domain().unwrap_or(host).to_owned(),
-                path: cookie.path().unwrap_or("/").to_owned(),
-                http_only: cookie.http_only(),
-                secure: cookie.secure(),
-            })
-            .collect::<Vec<_>>();
-        Ok(AddOutcome::Confirmed(cookies))
+        Ok(AddOutcome::Confirmed(self.session_cookies()))
     }
 
     pub(crate) fn seed_browser_cookies(&self, cookies: &[SessionCookie]) {
@@ -388,5 +407,37 @@ mod tests {
         assert!(atb_token(&jar, &page).is_none());
         jar.add("as_atb=prefix|abc123; Path=/; Secure", page.as_str());
         assert_eq!(atb_token(&jar, &page).as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn uncertain_add_keeps_the_http_session_for_browser_inspection() {
+        let cn = region_by_locale("zh_CN").unwrap();
+        let target = Target {
+            locale: "zh_CN".into(),
+            store_number: "R683".into(),
+            store_title: "测试门店".into(),
+            part_number: "MJYE4CH/A".into(),
+            product_name: "测试商品".into(),
+            companion_part: None,
+            pickup_location: None,
+        };
+        let session = DirectCart::new(cn, &target, None).unwrap();
+        session.seed_browser_cookies(&[SessionCookie {
+            name: "test_session".into(),
+            value: "test-value".into(),
+            domain: "www.apple.com.cn".into(),
+            path: "/".into(),
+            http_only: true,
+            secure: true,
+        }]);
+        let AddOutcome::Uncertain { reason, cookies } = session.uncertain("结果不明".into())
+        else {
+            panic!("结果不明必须保留浏览器核对用的会话");
+        };
+        assert_eq!(reason, "结果不明");
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookies[0].name, "test_session");
+        assert_eq!(cookies[0].value, "test-value");
+        assert!(cookies[0].secure && cookies[0].http_only);
     }
 }

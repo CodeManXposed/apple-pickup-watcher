@@ -546,6 +546,27 @@ async fn open_auto_add(
                                 api_stop_retries = true;
                                 return Err(reason);
                             }
+                            direct_cart::AddOutcome::Uncertain { reason, cookies } => {
+                                api_stop_retries = true;
+                                let inspection = if cookies.is_empty() {
+                                    Err("会话没有可交接的 Apple Cookie".to_owned())
+                                } else {
+                                    browser_bot::open_direct_bag(
+                                        app,
+                                        &region.bag_url(),
+                                        &cookies,
+                                        None,
+                                    )
+                                };
+                                return Err(match inspection {
+                                    Ok(()) => format!(
+                                        "{reason}；已在独立浏览器打开同一会话的购物袋，请核对商品和数量。本轮不会再次加车或自动结账。"
+                                    ),
+                                    Err(err) => format!(
+                                        "{reason}；无法自动打开同一会话的购物袋：{err}。本轮不会再次加车或自动结账。"
+                                    ),
+                                });
+                            }
                         };
                         api_add_confirmed = true;
                         api_stop_retries = true;

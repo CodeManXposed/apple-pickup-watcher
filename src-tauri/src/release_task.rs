@@ -115,6 +115,30 @@ async fn direct_release_add(
     let cookies = match session.add().await? {
         AddOutcome::Confirmed(cookies) => cookies,
         AddOutcome::Stop(reason) => return Ok(DirectReleaseResult::NoRetry(reason)),
+        AddOutcome::Uncertain { reason, cookies } => {
+            let inspection = if cookies.is_empty() {
+                Err("会话没有可交接的 Apple Cookie".to_owned())
+            } else {
+                let app_copy = app.clone();
+                let bag = region.bag_url();
+                let tab_id = tab_id.to_owned();
+                tauri::async_runtime::spawn_blocking(move || {
+                    browser_bot::open_direct_bag(&app_copy, &bag, &cookies, Some(&tab_id))
+                })
+                .await
+                .map_err(|err| err.to_string())
+                .and_then(|result| result)
+            };
+            let detail = match inspection {
+                Ok(()) => format!(
+                    "{reason}；已在独立浏览器打开同一会话的购物袋，请核对商品和数量。本轮不会再次加车或自动结账。"
+                ),
+                Err(err) => format!(
+                    "{reason}；无法自动打开同一会话的购物袋：{err}。本轮不会再次加车或自动结账。"
+                ),
+            };
+            return Ok(DirectReleaseResult::NoRetry(detail));
+        }
     };
     let handoff = async {
         let bag = format!(
