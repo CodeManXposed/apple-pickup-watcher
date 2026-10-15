@@ -1,7 +1,8 @@
 // 以 Chrome tab 为单位保存一次购买流程。session 存储会在扩展重载或浏览器重启时清空。
 const FLOW_PREFIX = 'apwCheckoutFlow:';
 const PARENT_PREFIX = 'apwCheckoutParent:';
-const FLOW_TTL_MS = 60 * 60 * 1000;
+const CHECKOUT_FLOW_TTL_MS = 4 * 60 * 60 * 1000;
+const PAYMENT_FLOW_TTL_MS = 60 * 60 * 1000;
 const BRIDGE_URL = 'http://127.0.0.1:43849/payment-link';
 const STATUS_URL = 'http://127.0.0.1:43849/task-status';
 const TASK_CHECK_URL = 'http://127.0.0.1:43849/task-check';
@@ -38,7 +39,11 @@ async function flowFor(tabId) {
     currentId = parentId;
   }
   if (!flow) return null;
-  if (Date.now() - flow.startedAt <= FLOW_TTL_MS) return flow;
+  const expiresFrom = flow.phase === 'order-submitted'
+    ? flow.orderSubmittedAt ?? flow.startedAt : flow.startedAt;
+  const ttl = flow.phase === 'order-submitted'
+    ? PAYMENT_FLOW_TTL_MS : CHECKOUT_FLOW_TTL_MS;
+  if (Number.isFinite(expiresFrom) && Date.now() - expiresFrom <= ttl) return flow;
   await chrome.storage.session.remove(key);
   await chrome.storage.session.remove(`${PARENT_PREFIX}${tabId}`);
   return null;
@@ -251,7 +256,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if (message?.type === 'apw-checkout-step' && flow && applePage(sender.url)) {
       const next = { bag: 'bag-clicked', 'bag-clicked': 'guest-clicked', 'guest-clicked': 'order-submitted' }[flow.phase];
       if (next !== message.phase) return null;
-      const updated = { ...flow, phase: next };
+      const updated = { ...flow, phase: next,
+        ...(next === 'order-submitted' ? { orderSubmittedAt: Date.now() } : {}) };
       await chrome.storage.session.set({ [key]: updated });
       return updated;
     }
@@ -291,7 +297,7 @@ chrome.webNavigation.onCreatedNavigationTarget.addListener((details) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   // 付款标签可能比来源标签更晚完成任务阶段同步。保留已进入访客结账的
-  // 来源身份，供付款页在一小时有效期内追溯；其他阶段立即清理。
+  // 来源身份，供付款页在订单提交后的一小时内追溯；其他阶段立即清理。
   flowFor(tabId).then(async (flow) => {
     if (flow && ['guest-clicked', 'order-submitted'].includes(flow.phase)) return;
     await chrome.storage.session.remove(`${FLOW_PREFIX}${tabId}`);

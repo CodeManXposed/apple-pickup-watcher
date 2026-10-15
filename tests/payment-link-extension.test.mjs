@@ -286,6 +286,35 @@ test('a closed checkout source cannot authorize payment links after one hour', a
   assert.equal((await app.send({ type: 'apw-payment-link', kind: 'cashier', url: alipay }, alipay, 2))?.reason, 'no-active-checkout');
 });
 
+test('manual Apple verification can exceed one hour and payment capture starts a fresh hour after submission', async () => {
+  const app = background();
+  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A', taskId }, apple);
+  await app.send({ type: 'apw-checkout-step', phase: 'bag-clicked' }, apple);
+  await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
+  app.advance(3 * 60 * 60 * 1000 + 59 * 60 * 1000);
+  assert.equal((await app.send({ type: 'apw-get-checkout' }, apple))?.phase, 'guest-clicked');
+
+  await app.send({ type: 'apw-checkout-step', phase: 'order-submitted' }, 'https://secure11.www.apple.com.cn/shop/checkout');
+  app.createTab({ id: 2, openerTabId: 1 });
+  await new Promise(setImmediate);
+  app.removeTab(1);
+  await new Promise(setImmediate);
+  app.advance(59 * 60 * 1000);
+  assert.equal((await app.send({ type: 'apw-payment-link', kind: 'cashier', url: alipay }, alipay, 2))?.ok, true);
+  app.advance(60 * 1000 + 1);
+  assert.equal((await app.send({ type: 'apw-payment-link', kind: 'cashier', url: alipay }, alipay, 2))?.reason, 'no-active-checkout');
+});
+
+test('checkout identity expires after four hours without an order', async () => {
+  const app = background();
+  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A', taskId }, apple);
+  await app.send({ type: 'apw-checkout-step', phase: 'bag-clicked' }, apple);
+  await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
+  app.advance(4 * 60 * 60 * 1000 + 1);
+  assert.equal(await app.send({ type: 'apw-get-checkout' }, apple), null);
+  assert.equal(await app.send({ type: 'apw-checkout-step', phase: 'order-submitted' }, 'https://secure11.www.apple.com.cn/shop/checkout'), null);
+});
+
 async function capture({ flow, nodes, images = [], barcodeDetector, now = 0 }) {
   const sent = [];
   const clock = { now: () => now };
