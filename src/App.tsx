@@ -1349,7 +1349,7 @@ export default function App() {
                           </div>
                           <StatusBadge availability={row.availability} />
                         </div>
-                        <div className="mt-4 grid gap-3 sm:grid-cols-2 2xl:grid-cols-[minmax(130px,0.8fr)_minmax(130px,0.8fr)_minmax(190px,1.3fr)_minmax(130px,0.8fr)]">
+                        <div className="mt-4 grid gap-3 sm:grid-cols-2 2xl:grid-cols-[minmax(130px,0.8fr)_minmax(190px,1.3fr)_minmax(130px,0.8fr)]">
                           <div>
                             <Label htmlFor={`task-mode-${key}`} className="text-muted-foreground text-xs">触发模式</Label>
                             <select
@@ -1361,19 +1361,6 @@ export default function App() {
                             >
                               <option value="restock">Restock · 补货</option>
                               <option value="release">Release · 发售</option>
-                            </select>
-                          </div>
-                          <div>
-                            <Label htmlFor={`task-add-method-${key}`} className="text-muted-foreground text-xs">加车模式</Label>
-                            <select
-                              id={`task-add-method-${key}`}
-                              className="border-input bg-background mt-1 h-9 w-full rounded-md border px-2 text-sm"
-                              value={addMethod}
-                              disabled={taskSaving}
-                              onChange={(event) => void onTaskPlanChange(row.target, { addMethod: event.target.value as TaskPlan["addMethod"] })}
-                            >
-                              <option value="browser">Chrome · 页面模拟</option>
-                              <option value="api">API · URL / SKU 直连</option>
                             </select>
                           </div>
                           <div>
@@ -1410,9 +1397,37 @@ export default function App() {
                             />
                           </div>
                         </div>
-                        {addMethod === "browser" && (
-                          <p className="text-muted-foreground mt-3 text-xs">Chrome 模式在独立浏览器中操作 Apple 商品页；需要验证时可在该浏览器完成。</p>
-                        )}
+                        <fieldset className="mt-4">
+                          <legend className="text-muted-foreground text-xs">加车方式</legend>
+                          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                            <label className={cn("flex cursor-pointer gap-3 rounded-lg border p-3", addMethod === "browser" ? "border-primary bg-primary/5" : "border-border bg-background")}>
+                              <input
+                                id={`task-add-method-browser-${key}`}
+                                type="radio"
+                                name={`task-add-method-${key}`}
+                                value="browser"
+                                checked={addMethod === "browser"}
+                                disabled={taskSaving}
+                                onChange={() => void onTaskPlanChange(row.target, { addMethod: "browser" })}
+                                className="accent-primary mt-0.5"
+                              />
+                              <span><span className="block text-sm font-medium">Chrome · 页面模拟</span><span className="text-muted-foreground mt-1 block text-xs">独立浏览器点击官网加车按钮，沿用页面中的等待与验证会话。</span></span>
+                            </label>
+                            <label className={cn("flex cursor-pointer gap-3 rounded-lg border p-3", addMethod === "api" ? "border-primary bg-primary/5" : "border-border bg-background")}>
+                              <input
+                                id={`task-add-method-api-${key}`}
+                                type="radio"
+                                name={`task-add-method-${key}`}
+                                value="api"
+                                checked={addMethod === "api"}
+                                disabled={taskSaving}
+                                onChange={() => void onTaskPlanChange(row.target, { addMethod: "api" })}
+                                className="accent-primary mt-0.5"
+                              />
+                              <span><span className="block text-sm font-medium">Apple 请求 · URL / SKU</span><span className="text-muted-foreground mt-1 block text-xs">Rust 直接请求 Apple 网页加车端点；成功后交给独立浏览器核对并结账。</span></span>
+                            </label>
+                          </div>
+                        </fieldset>
                         {addMethod === "api" && (
                           <div className="mt-3 grid gap-3 sm:grid-cols-[minmax(140px,0.35fr)_minmax(0,1fr)]">
                             <div>
@@ -1434,7 +1449,7 @@ export default function App() {
                                 }}
                               />
                             </div>
-                            <p className="text-muted-foreground text-xs sm:col-span-2">留空时按 SKU 请求 Apple 商品页；填写同地区的商品或机型 URL 时，会校验链接并绑定到任务 SKU，再请求 Apple 网页加车端点。发售时仍在独立 Chrome 等待放行，直连加车成功后由 Chrome 核对购物袋并继续结账。</p>
+                            <p className="text-muted-foreground text-xs sm:col-span-2">URL 留空时按任务 SKU 生成商品页；也可填写同地区的 Apple 官网 SKU 商品页或机型页。发售任务仍会在独立浏览器等待 Apple 放行。</p>
                           </div>
                         )}
                         <p className="text-muted-foreground mt-3 text-xs" role="status">{taskLabel}</p>

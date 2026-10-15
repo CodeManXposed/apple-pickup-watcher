@@ -64,28 +64,33 @@ fn official_url(input: &str, base: &Url, part: &str) -> Result<Url, String> {
     url.set_query(None);
     url.set_fragment(None);
     let path = url.path().trim_end_matches('/').to_owned();
-    if !path
-        .to_ascii_uppercase()
-        .ends_with(&format!("/{}", part.to_ascii_uppercase()))
-    {
-        // 官网机型页没有 SKU：例如 /shop/buy-iphone/iphone-18-pro。
-        // 只接受机型页这一层，避免把别的 SKU 页面当作机型页继续拼接。
-        let shop_prefix = format!("{}/shop/", base.path().trim_end_matches('/'));
-        let segments: Vec<_> = path
-            .strip_prefix(&shop_prefix)
-            .unwrap_or_default()
-            .split('/')
-            .collect();
-        if segments.len() != 2
-            || !segments[0].starts_with("buy-")
-            || segments[1].is_empty()
-            || !segments[1]
+    let shop_prefix = format!("{}/shop/", base.path().trim_end_matches('/'));
+    let segments: Vec<_> = path
+        .strip_prefix(&shop_prefix)
+        .unwrap_or_default()
+        .split('/')
+        .collect();
+    let model_page = |route: &str, model: &str| {
+        route.starts_with("buy-")
+            && route.len() > 4
+            && route[4..]
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        {
-            return Err("商品 URL 须为目标 SKU 页面或 Apple 官网机型页".into());
+            && !model.is_empty()
+            && model
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    };
+    let exact_sku =
+        |sku: &str, revision: &str| format!("{sku}/{revision}").eq_ignore_ascii_case(part);
+    match segments.as_slice() {
+        ["pdpAddToBag", sku, revision] if exact_sku(sku, revision) => {}
+        [route, model, sku, revision] if model_page(route, model) && exact_sku(sku, revision) => {}
+        [route, model] if model_page(route, model) => {
+            // 官网机型页没有 SKU：例如 /shop/buy-iphone/iphone-18-pro。
+            url.set_path(&format!("{path}/{}", part.to_ascii_uppercase()));
         }
-        url.set_path(&format!("{path}/{}", part.to_ascii_uppercase()));
+        _ => return Err("商品 URL 须为目标 SKU 页面或 Apple 官网机型页".into()),
     }
     Ok(url)
 }
@@ -477,6 +482,22 @@ mod tests {
         assert!(
             official_url(
                 "https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro/OTHERCH/A",
+                &base,
+                "MJYE4CH/A"
+            )
+            .is_err()
+        );
+        assert!(
+            official_url(
+                "https://www.apple.com.cn/shop/bag/MJYE4CH/A",
+                &base,
+                "MJYE4CH/A"
+            )
+            .is_err()
+        );
+        assert!(
+            official_url(
+                "https://www.apple.com.cn/shop/checkout/MJYE4CH/A",
                 &base,
                 "MJYE4CH/A"
             )

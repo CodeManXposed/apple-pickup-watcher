@@ -113,7 +113,7 @@ function renderApp() {
     panelIds: () => all((element) => element?.props?.role === "tabpanel").map((element) => element.props.id),
     taskSwitch: () => control((element) => element?.props?.id === "autoadd"),
     taskMode: (key) => control((element) => element?.props?.id === `task-mode-${key}`),
-    taskAddMethod: (key) => control((element) => element?.props?.id === `task-add-method-${key}`),
+    taskAddMethod: (key, method) => control((element) => element?.props?.id === `task-add-method-${method}-${key}`),
     taskSku: (key) => control((element) => element?.props?.id === `task-sku-${key}`),
     taskProductUrl: (key) => control((element) => element?.props?.id === `task-product-url-${key}`),
     taskRelease: (key) => control((element) => element?.props?.id === `task-release-${key}`),
@@ -177,7 +177,8 @@ test("each task saves release time and retry delay independently", async () => {
   app.state.rows = [{ target, availability: { kind: "out_of_stock" } }];
   app.tab("tasks").onClick();
   assert.equal(app.taskMode(key).value, "restock");
-  assert.equal(app.taskAddMethod(key).value, "browser");
+  assert.equal(app.taskAddMethod(key, "browser").checked, true);
+  assert.equal(app.taskAddMethod(key, "api").checked, false);
   assert.equal(app.taskRetry(key).value, "3000");
   assert.equal(app.taskRelease(key).disabled, true);
 
@@ -186,14 +187,22 @@ test("each task saves release time and retry delay independently", async () => {
   assert.equal(app.saved.at(-1).taskPlans[0].mode, "release");
   assert.equal(app.taskRelease(key).disabled, false);
 
-  app.taskAddMethod(key).onChange({ target: { value: "api" } });
+  app.taskAddMethod(key, "api").onChange();
   await new Promise(setImmediate);
   assert.equal(app.saved.at(-1).taskPlans[0].addMethod, "api");
+  assert.equal(app.taskAddMethod(key, "api").checked, true);
   assert.equal(app.taskSku(key).value, target.partNumber);
   assert.equal(app.taskSku(key).readOnly, true);
   assert.equal(app.taskProductUrl(key).defaultValue, "");
   const productUrl = "https://www.apple.com.cn/shop/pdpAddToBag/MJYE4CH/A";
   app.taskProductUrl(key).onBlur({ target: { value: productUrl } });
+  await new Promise(setImmediate);
+  assert.equal(app.saved.at(-1).taskPlans[0].productUrl, productUrl);
+
+  app.taskAddMethod(key, "browser").onChange();
+  await new Promise(setImmediate);
+  assert.equal(app.taskAddMethod(key, "browser").checked, true);
+  app.taskAddMethod(key, "api").onChange();
   await new Promise(setImmediate);
   assert.equal(app.saved.at(-1).taskPlans[0].productUrl, productUrl);
 
