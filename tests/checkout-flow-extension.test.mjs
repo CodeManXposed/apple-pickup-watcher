@@ -34,8 +34,11 @@ async function page({ pathname, hash = '', official = [], candidates = [], phase
         sent.push(message);
         if (failures.delete(message.type)) return null;
         if (message.type === 'apw-task-stage') return { ok: true };
-        if (message.type === 'apw-active-task') return activeTask;
-        if (message.type === 'apw-begin-checkout') currentPhase = 'bag';
+        if (message.type === 'apw-active-task') return typeof activeTask === 'function' ? activeTask() : activeTask;
+        if (message.type === 'apw-begin-checkout') {
+          if (!(typeof activeTask === 'function' ? activeTask() : activeTask)) return null;
+          currentPhase = 'bag';
+        }
         if (message.type === 'apw-checkout-step') currentPhase = message.phase;
         if (message.type === 'apw-confirm-store') currentFlow.pickupConfirmed = true;
         if (message.type === 'apw-confirm-alipay') currentFlow.alipayConfirmed = true;
@@ -92,6 +95,24 @@ test('marked bag clicks the official checkout button once', async () => {
   assert.equal(result.phase, 'bag-clicked');
   assert.equal(result.sent.find((message) => message.type === 'apw-begin-checkout')?.taskId, taskId);
   assert.equal(result.history.url, '/shop/bag');
+});
+
+test('bag retries task confirmation when it loads before the desktop marks the task launched', async () => {
+  const checkout = button('结账', {});
+  const item = { href: 'https://www.apple.com.cn/shop/product/mjye4ch/a', textContent: 'iPhone 18 Pro 256GB 黑色',
+    closest() { return { querySelector() { return { value: '1' }; } }; } };
+  let checks = 0;
+  const result = await page({
+    pathname: '/shop/bag', hash: `#apw-checkout=1&apw-store=R683&apw-part=MJYE4CH%2FA&apw-task=${taskId}`,
+    official: [checkout], selectors: { '[data-autom="bag-item-name"]': [item] },
+    activeTask: () => ++checks > 1,
+  });
+  assert.equal(checkout.clicks, 0);
+  assert.equal(result.phase, null);
+  await result.tick();
+  assert.equal(checkout.clicks, 1);
+  assert.equal(result.phase, 'bag-clicked');
+  assert.equal(checks, 3);
 });
 
 test('bag binds pickup area to the checkout task', async () => {

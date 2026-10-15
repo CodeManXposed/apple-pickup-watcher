@@ -32,6 +32,7 @@ BRIDGE_REQUESTS = []
 BRIDGE_RESPONSES = []
 LATEST_PAYMENT = None
 TEST_PAYMENT_MODE = ""
+TEST_DELAY_TASK_CHECK = False
 
 PAGES = {
     "/shop/pdpAddToBag/MJYE4CH/A": '''<!doctype html><meta charset="utf-8"><title>测试商品</title>
@@ -125,10 +126,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 for path, previous in BRIDGE_REQUESTS
             )
         )
+        first_task_check = TEST_DELAY_TASK_CHECK and self.path == "/task-check" and not any(
+            path == "/task-check" for path, _ in BRIDGE_REQUESTS
+        )
         BRIDGE_REQUESTS.append((self.path, payload))
         body = b'{"ok":true}'
         status = 401 if self.headers.get("Authorization") != "Bearer " + TOKEN else (
-            503 if first_frame_qr else 409 if duplicate_order_stage else 200
+            503 if first_frame_qr else 409 if first_task_check or duplicate_order_stage else 200
         )
         BRIDGE_RESPONSES.append((self.path, payload, status))
         if self.path == "/payment-link" and status == 200 and not (
@@ -383,6 +387,9 @@ async def run_browser(page_port, extension, profile, navigation_mode, payment_mo
             assert stages == ["bag", "checkout", "guest", "profile", "payment", "review"] + [
                 "orderSubmitted"
             ] * len(payments), stages
+            if navigation_mode == "delayed task":
+                checks = [status for path, _, status in BRIDGE_RESPONSES if path == "/task-check"]
+                assert checks[:2] == [409, 200], checks
             print(f"Chrome extension smoke passed ({navigation_mode}, {payment_mode}): product → bag → guest checkout → Profile → capped fixture order → Alipay link bridge")
     finally:
         process.terminate()
@@ -393,7 +400,7 @@ async def run_browser(page_port, extension, profile, navigation_mode, payment_mo
 
 
 async def main():
-    global LATEST_PAYMENT, TEST_PAYMENT_MODE
+    global LATEST_PAYMENT, TEST_PAYMENT_MODE, TEST_DELAY_TASK_CHECK
     pages = ThreadingHTTPServer(("127.0.0.1", 0), PageHandler)
     bridge = ThreadingHTTPServer(("127.0.0.1", 0), BridgeHandler)
     threading.Thread(target=pages.serve_forever, daemon=True).start()
@@ -407,12 +414,14 @@ async def main():
             ("same tab", "late-qr"),
             ("same tab", "iframe-retry"),
             ("noopener delayed tab", "qr"),
+            ("delayed task", "qr"),
         ):
             PAGE_HITS.clear()
             BRIDGE_REQUESTS.clear()
             BRIDGE_RESPONSES.clear()
             LATEST_PAYMENT = None
             TEST_PAYMENT_MODE = payment_mode
+            TEST_DELAY_TASK_CHECK = navigation_mode == "delayed task"
             PAGES["/alipay"] = {
                 "qr": f'''<!doctype html><meta charset="utf-8"><title>测试支付宝</title>
 <div data-url="{QR}" style="width:120px;height:120px">测试付款码</div>''',
@@ -431,6 +440,7 @@ async def main():
                     "noopener tab": "window.open('/alipay', '_blank', 'noopener')",
                     "noopener Apple relay": "window.open('/shop/payment-relay', '_blank', 'noopener')",
                     "noopener delayed tab": "window.open('/alipay', '_blank', 'noopener')",
+                    "delayed task": "location.href='/alipay'",
                 }[navigation_mode],
             )
             with tempfile.TemporaryDirectory(prefix="apw-browser-smoke-") as directory:

@@ -430,8 +430,12 @@
       if (!verifiedName) return;
       const started = await chrome.runtime.sendMessage({ type: 'apw-begin-checkout', storeNumber, partNumber, taskId, productName: verifiedName, area });
       if (!started) {
-        done = true;
-        notice('无法确认当前监控任务或连接桌面应用，已停止自动结账。', true);
+        if (Date.now() - startedAt > 30000) {
+          done = true;
+          notice('无法确认当前监控任务或连接桌面应用，已停止自动结账。', true);
+        } else {
+          notice('正在等待桌面应用确认当前监控任务…');
+        }
         return;
       }
       begun = true;
