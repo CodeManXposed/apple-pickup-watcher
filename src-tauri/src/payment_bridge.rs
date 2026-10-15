@@ -151,7 +151,7 @@ impl PaymentBridge {
             status.part_number == task.part_number
                 && status.store_number == task.store_number
                 && status.task_id == task.task_id
-                && stage_rank(&status.stage).is_some_and(|rank| (1..10).contains(&rank))
+                && stage_rank(&status.stage).is_some_and(|rank| (1..12).contains(&rank))
         })
     }
 
@@ -297,18 +297,20 @@ fn now() -> u64 {
 fn stage_rank(stage: &str) -> Option<u8> {
     Some(match stage {
         "starting" => 0,
-        "launched" => 1,
-        "bag" => 2,
-        "checkout" => 3,
-        "guest" => 4,
-        "privacy" => 5,
-        "profile" => 6,
-        "profileAction" => 7,
-        "payment" => 8,
-        "review" => 9,
-        "orderSubmitted" => 10,
-        "paymentLink" => 11,
-        "failed" => 12,
+        "waitingRelease" => 1,
+        "waitingRoom" => 2,
+        "launched" => 3,
+        "bag" => 4,
+        "checkout" => 5,
+        "guest" => 6,
+        "privacy" => 7,
+        "profile" => 8,
+        "profileAction" => 9,
+        "payment" => 10,
+        "review" => 11,
+        "orderSubmitted" => 12,
+        "paymentLink" => 13,
+        "failed" => 14,
         _ => return None,
     })
 }

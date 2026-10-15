@@ -7,6 +7,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -860,7 +861,7 @@ pub(crate) fn preflight(app: &AppHandle, pairing_code: &str) -> Result<(), Strin
     check_checkout_profile(&data, pairing_code)
 }
 
-fn launch(app: &AppHandle, task_url: Option<&str>) -> Result<(), String> {
+fn launch(app: &AppHandle, task_url: Option<&str>) -> Result<String, String> {
     let _guard = BROWSER_LAUNCH
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -874,13 +875,18 @@ fn launch(app: &AppHandle, task_url: Option<&str>) -> Result<(), String> {
         "Target.createTarget",
         serde_json::json!({"url": url}),
     )?;
-    if created.get("targetId").and_then(Value::as_str).is_none() {
-        return Err("浏览器未打开购买页面".into());
-    }
-    Ok(())
+    created
+        .get("targetId")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "浏览器未打开购买页面".into())
 }
 
 pub(crate) fn open_task(app: &AppHandle, url: &str) -> Result<(), String> {
+    prewarm_task(app, url).map(|_| ())
+}
+
+pub(crate) fn prewarm_task(app: &AppHandle, url: &str) -> Result<String, String> {
     let parsed = reqwest::Url::parse(url).map_err(|_| "购买页面地址无效".to_owned())?;
     if parsed.scheme() != "https"
         || !matches!(
@@ -893,8 +899,102 @@ pub(crate) fn open_task(app: &AppHandle, url: &str) -> Result<(), String> {
     launch(app, Some(url))
 }
 
+/// 发售等待页放行后，在原标签页启动加车脚本，保留排队和验证所用的浏览器会话。
+/// 页面尚未出现目标 SKU 的官方加车表单时只返回 false，不尝试绕过等待页。
+pub(crate) fn activate_release(
+    app: &AppHandle,
+    target_id: &str,
+    part_number: &str,
+    task_url: &str,
+    refresh_missing: bool,
+    cancelled: &AtomicBool,
+) -> Result<bool, String> {
+    let _guard = BROWSER_LAUNCH
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (mut browser, extension) = loaded_browser(app)?;
+    let target = cdp_call(
+        &mut browser,
+        2,
+        "Target.getTargetInfo",
+        serde_json::json!({"targetId": target_id}),
+    )?;
+    let current = target["targetInfo"]["url"]
+        .as_str()
+        .ok_or("独立浏览器中的发售标签页已关闭")?;
+    let current = reqwest::Url::parse(current).map_err(|_| "发售标签页地址无效".to_owned())?;
+    let intended = reqwest::Url::parse(task_url).map_err(|_| "任务地址无效".to_owned())?;
+    if current.scheme() != "https"
+        || current.host_str() != intended.host_str()
+        || !current.path().contains("/shop/")
+    {
+        return Ok(false);
+    }
+    let attached = cdp_call(
+        &mut browser,
+        3,
+        "Target.attachToTarget",
+        serde_json::json!({"targetId": target_id, "flatten": true}),
+    )?;
+    let session = attached["sessionId"].as_str().ok_or("无法连接发售标签页")?;
+    let not_found = current.path().ends_with("/shop/404")
+        || target["targetInfo"]["title"]
+            .as_str()
+            .is_some_and(|title| title.starts_with("Page Not Found"));
+    if not_found {
+        if refresh_missing && !cancelled.load(Ordering::SeqCst) {
+            let mut retry_url = intended.clone();
+            retry_url.set_fragment(None);
+            cdp_call_with_session(
+                &mut browser,
+                4,
+                "Page.navigate",
+                serde_json::json!({"url": retry_url.as_str()}),
+                Some(session),
+            )?;
+        }
+        return Ok(false);
+    }
+    let part = serde_json::to_string(part_number).map_err(|e| e.to_string())?;
+    let ready = cdp_call_with_session(
+        &mut browser,
+        5,
+        "Runtime.evaluate",
+        serde_json::json!({
+            "expression": format!("Array.from(document.querySelectorAll('form[data-part-number]')).some(form => form.getAttribute('data-part-number')?.toUpperCase() === {part} && form.querySelector('[data-autom=\"add-to-cart\"]'))"),
+            "returnByValue": true,
+        }),
+        Some(session),
+    )?;
+    if ready["result"]["value"].as_bool() != Some(true) {
+        return Ok(false);
+    }
+    if cancelled.load(Ordering::SeqCst) {
+        return Ok(false);
+    }
+    let script = fs::read_to_string(extension.dir.join("content.js"))
+        .map_err(|e| format!("读取加车脚本失败：{e}"))?;
+    let fragment = intended.fragment().ok_or("任务地址缺少加车标记")?;
+    let expression = format!(
+        "location.hash = {};\n{}",
+        serde_json::to_string(fragment).map_err(|e| e.to_string())?,
+        script
+    );
+    let result = cdp_call_with_session(
+        &mut browser,
+        6,
+        "Runtime.evaluate",
+        serde_json::json!({"expression": expression, "returnByValue": true}),
+        Some(session),
+    )?;
+    if let Some(exception) = result.get("exceptionDetails") {
+        return Err(format!("启动发售任务脚本失败：{exception}"));
+    }
+    Ok(true)
+}
+
 pub(crate) fn open_profile(app: &AppHandle) -> Result<(), String> {
-    launch(app, None)
+    launch(app, None).map(|_| ())
 }
 
 #[cfg(test)]

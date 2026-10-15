@@ -81,6 +81,7 @@ const DEFAULT_SETTINGS: Settings = {
   soundEnabled: true,
   openBagOnHit: true,
   autoAddToBag: false,
+  taskPlans: [],
   proxies: [],
 };
 
@@ -356,7 +357,9 @@ export async function changeLocale(locale: string): Promise<void> {
 export async function setTargets(targets: Target[]): Promise<void> {
   try {
     const rows = await invoke<TargetState[]>("set_targets", { targets });
-    update({ rows, settings: { ...state.settings, targets } });
+    const keys = new Set(targets.map((target) => `${target.locale}|${target.storeNumber}|${target.partNumber}`));
+    update({ rows, settings: { ...state.settings, targets,
+      taskPlans: (state.settings.taskPlans ?? []).filter((plan) => keys.has(plan.targetKey)) } });
   } catch (err) {
     pushLog(`更新监控列表失败：${String(err)}`);
   }

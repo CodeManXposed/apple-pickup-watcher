@@ -50,6 +50,16 @@ impl AutoOpenBag {
         self.opened_this_run
     }
 
+    /// 发售任务提前占用本轮唯一购买任务名额，避免其他补货命中打断等待页。
+    pub(crate) fn reserve_release(&mut self) -> bool {
+        if self.opened_this_run {
+            return false;
+        }
+        self.opened_this_run = true;
+        self.auto_task_launched = true;
+        true
+    }
+
     pub(crate) fn open_if_needed<E>(
         &mut self,
         enabled: bool,
@@ -191,6 +201,20 @@ mod tests {
                 "https://www.apple.com.cn/shop/pdpAddToBag/MJYE4CH/A#apw-auto-add=MJYE4CH%2FA&apw-store=R683"
             ]
         );
+    }
+
+    #[test]
+    fn 发售待命占用本轮任务名额() {
+        let mut gate = AutoOpenBag::default();
+        gate.on_run_state_changed(true);
+        assert!(gate.reserve_release());
+        assert!(!gate.reserve_release());
+        gate.open_if_needed(true, "zh_CN", Some(("MJYE4CH/A", "R683")), |_| {
+            panic!("发售待命后不能启动补货任务")
+        })
+        .unwrap_or_else(|_: ()| unreachable!());
+        gate.on_run_state_changed(true);
+        assert!(gate.reserve_release());
     }
 
     #[test]

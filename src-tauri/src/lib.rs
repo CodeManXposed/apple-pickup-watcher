@@ -9,7 +9,8 @@
 //! 系统节流甚至挂起，把「及时提醒」挂在一个会被挂起的执行环境上是不能接受的。
 
 use std::sync::RwLock;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use apw_core::apple::{AppleClient, ClientConfig};
 use apw_core::catalog::Catalog;
@@ -27,6 +28,7 @@ mod auto_open;
 mod browser_bot;
 mod notification_queue;
 mod payment_bridge;
+mod release_task;
 
 use auto_open::AutoOpenBag;
 use payment_bridge::{PaymentBridge, PaymentLink};
@@ -312,6 +314,7 @@ async fn set_targets(
     state.watcher.set_targets(targets.clone()).await;
     let mut next = state.settings_snapshot();
     next.targets = targets;
+    next.normalize();
     state.put_settings(next)?;
     Ok(state.watcher.snapshot().await)
 }
@@ -555,9 +558,11 @@ fn open_auto_add(app: &AppHandle, gate: &mut AutoOpenBag, target: &Target) -> Re
 fn retryable_target<'a>(
     snapshot: &'a [TargetState],
     preferred: Option<&Target>,
+    settings: &Settings,
 ) -> Option<&'a Target> {
     let valid = |state: &TargetState| {
         state.availability.is_in_stock()
+            && release_task::is_restock(settings, &state.target)
             && region_by_locale(&state.target.locale)
                 .and_then(|region| region.auto_add_url(&state.target.part_number))
                 .is_some()
@@ -579,6 +584,7 @@ fn retryable_target<'a>(
 #[cfg(test)]
 mod retry_target_tests {
     use super::*;
+    use apw_core::config::{TaskMode, TaskPlan};
     use apw_core::model::{Availability, UnknownReason};
 
     #[test]
@@ -598,31 +604,40 @@ mod retry_target_tests {
             last_checked_ms: None,
             consecutive_failures: 0,
         };
-        assert!(retryable_target(&[state.clone()], None).is_none());
+        let settings = Settings::default();
+        assert!(retryable_target(&[state.clone()], None, &settings).is_none());
         state.availability = Availability::OutOfStock;
-        assert!(retryable_target(&[state.clone()], None).is_none());
+        assert!(retryable_target(&[state.clone()], None, &settings).is_none());
         state.availability = Availability::InStock;
         assert_eq!(
-            retryable_target(&[state.clone()], None)
+            retryable_target(&[state.clone()], None, &settings)
                 .unwrap()
                 .store_number,
             "R683"
         );
+        let mut release_settings = Settings::default();
+        release_settings.task_plans.push(TaskPlan {
+            target_key: state.target.key().0,
+            mode: TaskMode::Release,
+            release_at_ms: Some(1_800_000_000_000),
+            retry_delay_ms: 3_000,
+        });
+        assert!(retryable_target(&[state.clone()], None, &release_settings).is_none());
         let preferred = state.clone();
         let mut earlier = state.clone();
         earlier.target.store_number = "R001".into();
         let candidates = [earlier, preferred.clone()];
         assert_eq!(
-            retryable_target(&candidates, Some(&preferred.target))
+            retryable_target(&candidates, Some(&preferred.target), &settings)
                 .unwrap()
                 .store_number,
             "R683"
         );
         state.target.part_number = "../bag".into();
-        assert!(retryable_target(&[state.clone()], None).is_none());
+        assert!(retryable_target(&[state.clone()], None, &settings).is_none());
         state.target.part_number = "MJYE4CH/A".into();
         state.target.store_number = "bad/store".into();
-        assert!(retryable_target(&[state], None).is_none());
+        assert!(retryable_target(&[state], None, &settings).is_none());
     }
 }
 
@@ -632,6 +647,10 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
     let mut watch_running = false;
     let mut auto_add_enabled = app.state::<AppState>().settings_snapshot().auto_add_to_bag;
     let mut pending_retry: Option<Target> = None;
+    let mut retry_at: Option<Instant> = None;
+    let mut latest_snapshot: Vec<TargetState> = Vec::new();
+    let mut release_cancel: Option<std::sync::Arc<AtomicBool>> = None;
+    let mut task_tick = tokio::time::interval(Duration::from_secs(1));
     let (notifications, pending) = notification_queue::channel();
     let notification_app = app.clone();
     tauri::async_runtime::spawn(notification_queue::run(pending, move |notification| {
@@ -643,15 +662,82 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
         }
     }));
 
-    while let Some(event) = events.recv().await {
+    loop {
+        let event = tokio::select! {
+            event = events.recv() => event,
+            _ = task_tick.tick() => {
+                let settings = app.state::<AppState>().settings_snapshot();
+                if !watch_running || !settings.auto_add_to_bag {
+                    if let Some(cancel) = &release_cancel {
+                        cancel.store(true, Ordering::SeqCst);
+                    }
+                    continue;
+                }
+
+                if !auto_open_bag.has_opened()
+                    && let Some((target, plan)) = release_task::due_release(&settings, release_task::now_ms())
+                    && auto_open_bag.reserve_release()
+                {
+                    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+                    release_cancel = Some(cancel.clone());
+                    let release_app = app.clone();
+                    let checkout_area = app.state::<AppState>()
+                        .catalog
+                        .store_by_number(&target.locale, &target.store_number)
+                        .and_then(|store| {
+                            store.checkout_area(&target.locale)
+                                .map(|(province, city, district)| {
+                                    (province.to_string(), city.to_string(), district.to_string())
+                                })
+                        });
+                    tauri::async_runtime::spawn(release_task::run(
+                        release_app, target, plan, checkout_area, cancel,
+                    ));
+                }
+
+                if let Some(preferred) = pending_retry.as_ref() {
+                    if !auto_open_bag.has_opened()
+                        && retry_at.is_some_and(|at| Instant::now() >= at)
+                    {
+                        if let Some(target) = retryable_target(&latest_snapshot, Some(preferred), &settings).cloned() {
+                            if let Err(err) = open_auto_add(&app, &mut auto_open_bag, &target) {
+                                retry_at = Some(Instant::now() + Duration::from_millis(
+                                    release_task::plan_for(&settings, &target)
+                                        .map_or(apw_core::config::DEFAULT_TASK_RETRY_DELAY_MS, |plan| plan.retry_delay_ms),
+                                ));
+                                let _ = app.emit(NOTICE_CHANNEL, format!("重试打开购买页面失败：{err}"));
+                            } else if auto_open_bag.has_opened() {
+                                pending_retry = None;
+                                retry_at = None;
+                            }
+                        } else {
+                            pending_retry = None;
+                            retry_at = None;
+                        }
+                    }
+                    if auto_open_bag.retry_limit_reached() {
+                        pending_retry = None;
+                        retry_at = None;
+                        let _ = app.emit(NOTICE_CHANNEL, "自动加车连续三次启动失败，本次监控不再重试；检查独立浏览器后暂停并重新开始监控。");
+                    }
+                }
+                continue;
+            }
+        };
+        let Some(event) = event else { break };
         // 先原样转发。前端拿到的事件流应当与引擎发出的完全一致，
         // 中间少一层可能出错的翻译。
         let _ = app.emit(EVENT_CHANNEL, &event);
 
         if let Event::RunStateChanged { running } = &event {
+            if !running && let Some(cancel) = release_cancel.take() {
+                cancel.store(true, Ordering::SeqCst);
+            }
             auto_open_bag.on_run_state_changed(*running);
             watch_running = *running;
             pending_retry = None;
+            retry_at = None;
+            latest_snapshot.clear();
         }
 
         if let Event::InStock { state } = &event {
@@ -698,25 +784,38 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
             }
 
             use tauri_plugin_opener::OpenerExt;
-            let open_result = if settings.auto_add_to_bag {
-                open_auto_add(&app, &mut auto_open_bag, target)
-            } else {
-                auto_open_bag.open_if_needed(
-                    settings.open_bag_on_hit,
-                    &target.locale,
-                    None,
-                    |url| {
-                        app.opener()
-                            .open_url(url, None::<&str>)
-                            .map_err(|e| e.to_string())
-                    },
-                )
-            };
-            if settings.auto_add_to_bag {
+            let open_result =
+                if settings.auto_add_to_bag && release_task::is_restock(&settings, target) {
+                    open_auto_add(&app, &mut auto_open_bag, target)
+                } else if settings.auto_add_to_bag {
+                    Ok(())
+                } else {
+                    auto_open_bag.open_if_needed(
+                        settings.open_bag_on_hit,
+                        &target.locale,
+                        None,
+                        |url| {
+                            app.opener()
+                                .open_url(url, None::<&str>)
+                                .map_err(|e| e.to_string())
+                        },
+                    )
+                };
+            if settings.auto_add_to_bag && release_task::is_restock(&settings, target) {
                 if open_result.is_err() {
                     pending_retry = Some(target.clone());
+                    retry_at = Some(
+                        Instant::now()
+                            + Duration::from_millis(
+                                release_task::plan_for(&settings, target).map_or(
+                                    apw_core::config::DEFAULT_TASK_RETRY_DELAY_MS,
+                                    |plan| plan.retry_delay_ms,
+                                ),
+                            ),
+                    );
                 } else if auto_open_bag.has_opened() {
                     pending_retry = None;
+                    retry_at = None;
                 }
             }
             if let Err(err) = open_result {
@@ -731,6 +830,7 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
         }
 
         if let Event::CycleComplete { snapshot, .. } = &event {
+            latest_snapshot = snapshot.clone();
             let settings = app.state::<AppState>().settings_snapshot();
             if settings.auto_add_to_bag && !auto_add_enabled {
                 auto_open_bag.on_auto_add_enabled();
@@ -739,16 +839,30 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
             auto_add_enabled = settings.auto_add_to_bag;
             if !auto_add_enabled {
                 pending_retry = None;
+                retry_at = None;
             }
             let ready_for_attempt = auto_open_bag.should_try_on_cycle();
-            if !watch_running || !settings.auto_add_to_bag || !ready_for_attempt {
+            if !watch_running
+                || !settings.auto_add_to_bag
+                || !ready_for_attempt
+                || pending_retry.is_some()
+            {
                 continue;
             }
-            let Some(target) = retryable_target(snapshot, pending_retry.as_ref()) else {
+            let Some(target) = retryable_target(snapshot, None, &settings) else {
                 continue;
             };
             if let Err(err) = open_auto_add(&app, &mut auto_open_bag, target) {
                 pending_retry = Some(target.clone());
+                retry_at = Some(
+                    Instant::now()
+                        + Duration::from_millis(
+                            release_task::plan_for(&settings, target)
+                                .map_or(apw_core::config::DEFAULT_TASK_RETRY_DELAY_MS, |plan| {
+                                    plan.retry_delay_ms
+                                }),
+                        ),
+                );
                 let _ = app.emit(NOTICE_CHANNEL, format!("重试打开购买页面失败：{err}"));
                 if auto_open_bag.retry_limit_reached() {
                     let _ = app.emit(
@@ -758,6 +872,7 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
                 }
             } else if auto_open_bag.has_opened() {
                 pending_retry = None;
+                retry_at = None;
             }
         }
     }

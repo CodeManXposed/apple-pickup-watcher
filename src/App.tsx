@@ -86,6 +86,7 @@ import {
   type Product,
   type Settings,
   type StatusTone,
+  type TaskPlan,
   type Target,
   targetKey,
 } from "@/lib/types";
@@ -103,6 +104,8 @@ const TONE_CLASS: Record<StatusTone, string> = {
 
 const BOT_STAGE_LABEL: Record<BotStatus["stage"], string> = {
   starting: "正在启动独立浏览器",
+  waitingRelease: "已打开商品页，等待开售时间",
+  waitingRoom: "等待 Apple 放行或验证",
   launched: "已打开商品页",
   bag: "已进入购物袋",
   checkout: "正在进入结账",
@@ -228,6 +231,14 @@ function settingsSummary(s: Settings): string {
   ].join(" · ");
 }
 
+function localDateTime(ms: number | null | undefined): string {
+  if (!ms) return "";
+  const date = new Date(ms);
+  if (!Number.isFinite(date.getTime())) return "";
+  const two = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}T${two(date.getHours())}:${two(date.getMinutes())}`;
+}
+
 /** 运行状态。一个会呼吸的点比一行灰字更像「它还活着」。 */
 function RunState({ running }: { running: boolean }) {
   return (
@@ -300,6 +311,8 @@ export default function App() {
   const [watchStartError, setWatchStartError] = useState("");
   const [taskSaving, setTaskSaving] = useState(false);
   const [taskFeedback, setTaskFeedback] = useState("");
+  const [releaseDrafts, setReleaseDrafts] = useState<Record<string, string>>({});
+  const [retryDrafts, setRetryDrafts] = useState<Record<string, string>>({});
 
   async function onStartWatching() {
     setWatchStarting(true);
@@ -321,6 +334,51 @@ export default function App() {
     } finally {
       setTaskSaving(false);
     }
+  }
+
+  async function onTaskPlanChange(target: Target, patch: Partial<TaskPlan>) {
+    const key = targetKey(target);
+    const plans = ui.settings.taskPlans ?? [];
+    const existing = plans.find((plan) => plan.targetKey === key);
+    const next: TaskPlan = {
+      targetKey: key,
+      mode: existing?.mode ?? "restock",
+      releaseAtMs: existing?.releaseAtMs ?? null,
+      retryDelayMs: existing?.retryDelayMs ?? 3000,
+      ...patch,
+    };
+    setTaskSaving(true);
+    setTaskFeedback("");
+    try {
+      setTaskFeedback((await saveSettings({
+        ...ui.settings,
+        taskPlans: [...plans.filter((plan) => plan.targetKey !== key), next],
+      })) ?? "");
+    } finally {
+      setTaskSaving(false);
+    }
+  }
+
+  function saveReleaseTime(target: Target, value: string) {
+    if (!value) {
+      void onTaskPlanChange(target, { releaseAtMs: null });
+      return;
+    }
+    const at = new Date(value).getTime();
+    if (!Number.isFinite(at) || at <= Date.now()) {
+      setTaskFeedback("开售时间需填写未来的本地日期和时间。");
+      return;
+    }
+    void onTaskPlanChange(target, { releaseAtMs: at });
+  }
+
+  function saveRetryDelay(target: Target, value: string) {
+    const milliseconds = Number(value);
+    if (!Number.isInteger(milliseconds) || milliseconds < 1000 || milliseconds > 60000) {
+      setTaskFeedback("重试延迟须为 1000–60000 毫秒。");
+      return;
+    }
+    void onTaskPlanChange(target, { retryDelayMs: milliseconds });
   }
 
   async function onPrepareBrowser() {
@@ -1186,7 +1244,7 @@ export default function App() {
                 <p className="text-primary text-[10px] font-semibold tracking-[0.18em]">AUTOMATION</p>
                 <h2 className="text-xl font-semibold tracking-tight">任务</h2>
               </div>
-              <p className="text-muted-foreground text-xs">库存命中 → 加车 → 结账 → 支付宝</p>
+              <p className="text-muted-foreground text-xs">发售待命 / 补货监听 → 加车 → 结账 → 支付宝</p>
             </div>
             <section className="tasks-control bg-card rounded-xl border px-4 py-3 shadow-sm shadow-black/10">
               <div className="flex flex-wrap items-center gap-3">
@@ -1196,51 +1254,98 @@ export default function App() {
                   disabled={taskSaving}
                   onCheckedChange={(value) => void onAutoAddChange(value)}
                 />
-                <Label htmlFor="autoadd" className="font-medium">有货时启动自动加车任务</Label>
+                <Label htmlFor="autoadd" className="font-medium">启用自动任务</Label>
                 <Button variant="outline" size="sm" className="ml-auto" onClick={() => selectTab("profile")}>设置 Profile</Button>
               </div>
               {taskFeedback && <p role="alert" className="text-destructive mt-2 text-sm">{taskFeedback}</p>}
               <p className="text-muted-foreground mt-2 text-xs">
-                首个有货目标启动浏览器任务；其他目标继续监控并提醒。启动时会检查浏览器和 Profile。
+                每轮最多执行一个购买任务。发售模式提前 10 分钟打开独立浏览器，在原标签页等待 Apple 放行；补货模式在库存命中时启动。
               </p>
             </section>
 
             <section className="tasks-list bg-card flex min-h-0 flex-col overflow-hidden rounded-xl border shadow-sm shadow-black/10">
               <div className="border-b px-4 py-3">
                 <h2 className="font-semibold">任务队列</h2>
-                <p className="text-muted-foreground text-xs">监控目标是候选任务；每次运行最多启动首个命中项。</p>
+                <p className="text-muted-foreground text-xs">每条任务可单独选择模式、开售时间和重试延迟。先到的任务占用本轮执行名额。</p>
               </div>
               <ScrollArea className="min-h-0 flex-1">
-                <Table>
-                  <TableHeader><TableRow>
-                    <TableHead className="pl-4">商品</TableHead>
-                    <TableHead>门店</TableHead>
-                    <TableHead>库存</TableHead>
-                    <TableHead>任务状态</TableHead>
-                  </TableRow></TableHeader>
-                  <TableBody>
-                    {ui.rows.length === 0 ? (
-                      <TableRow><TableCell colSpan={4} className="text-muted-foreground h-24 text-center">
-                        尚无任务候选。请到监控页添加目标。
-                      </TableCell></TableRow>
-                    ) : ui.rows.map((row) => {
-                      const current = ui.botStatus?.partNumber === row.target.partNumber &&
-                        ui.botStatus.storeNumber === row.target.storeNumber;
-                      const taskLabel = current && ui.botStatus
-                        ? `最近：${BOT_STAGE_LABEL[ui.botStatus.stage]}`
-                        : !ui.settings.autoAddToBag ? "自动加车未启用"
-                          : ui.botStatus ? "未启动浏览器任务" : "等待库存命中";
-                      return (
-                        <TableRow key={targetKey(row.target)}>
-                          <TableCell className="pl-4 font-medium">{row.target.productName}</TableCell>
-                          <TableCell>{row.target.storeTitle}</TableCell>
-                          <TableCell><StatusBadge availability={row.availability} /></TableCell>
-                          <TableCell className="text-muted-foreground text-xs">{taskLabel}</TableCell>
-                        </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
+                <div className="grid gap-3 p-3">
+                  {ui.rows.length === 0 ? (
+                    <p className="text-muted-foreground py-10 text-center text-sm">尚无任务候选。请到监控页添加目标。</p>
+                  ) : ui.rows.map((row) => {
+                    const key = targetKey(row.target);
+                    const plan = (ui.settings.taskPlans ?? []).find((item) => item.targetKey === key);
+                    const mode = plan?.mode ?? "restock";
+                    const current = ui.botStatus?.partNumber === row.target.partNumber &&
+                      ui.botStatus.storeNumber === row.target.storeNumber;
+                    const taskLabel = current && ui.botStatus
+                      ? BOT_STAGE_LABEL[ui.botStatus.stage]
+                      : !ui.settings.autoAddToBag ? "自动任务未启用"
+                        : mode === "release" ? !plan?.releaseAtMs ? "请填写开售时间"
+                          : plan.releaseAtMs + 4 * 60 * 60 * 1000 < Date.now() ? "本次发售窗口已过"
+                            : "等待发售时段" : "等待库存命中";
+                    return (
+                      <article key={key} className="bg-muted/20 rounded-lg border p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-semibold" title={row.target.productName}>{row.target.productName}</p>
+                            <p className="text-muted-foreground mt-1 text-xs">{row.target.storeTitle} · {row.target.partNumber}</p>
+                          </div>
+                          <StatusBadge availability={row.availability} />
+                        </div>
+                        <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(130px,0.8fr)_minmax(190px,1.3fr)_minmax(130px,0.8fr)]">
+                          <div>
+                            <Label htmlFor={`task-mode-${key}`} className="text-muted-foreground text-xs">任务模式</Label>
+                            <select
+                              id={`task-mode-${key}`}
+                              className="border-input bg-background mt-1 h-9 w-full rounded-md border px-2 text-sm"
+                              value={mode}
+                              disabled={taskSaving}
+                              onChange={(event) => void onTaskPlanChange(row.target, { mode: event.target.value as TaskPlan["mode"] })}
+                            >
+                              <option value="restock">Restock · 补货</option>
+                              <option value="release">Release · 发售</option>
+                            </select>
+                          </div>
+                          <div>
+                            <Label htmlFor={`task-release-${key}`} className="text-muted-foreground text-xs">开售时间 · 本地时区</Label>
+                            <Input
+                              id={`task-release-${key}`}
+                              type="datetime-local"
+                              className="mt-1 h-9"
+                              value={releaseDrafts[key] ?? localDateTime(plan?.releaseAtMs)}
+                              disabled={taskSaving || mode !== "release"}
+                              onChange={(event) => setReleaseDrafts({ ...releaseDrafts, [key]: event.target.value })}
+                              onBlur={(event) => {
+                                const value = event.target.value;
+                                if (value !== localDateTime(plan?.releaseAtMs)) saveReleaseTime(row.target, value);
+                              }}
+                            />
+                          </div>
+                          <div>
+                            <Label htmlFor={`task-retry-${key}`} className="text-muted-foreground text-xs">Retry delay · 毫秒</Label>
+                            <Input
+                              id={`task-retry-${key}`}
+                              type="number"
+                              min={1000}
+                              max={60000}
+                              step={1000}
+                              className="mt-1 h-9"
+                              value={retryDrafts[key] ?? String(plan?.retryDelayMs ?? 3000)}
+                              disabled={taskSaving}
+                              onChange={(event) => setRetryDrafts({ ...retryDrafts, [key]: event.target.value })}
+                              onBlur={(event) => {
+                                const value = event.target.value;
+                                if (value !== String(plan?.retryDelayMs ?? 3000)) saveRetryDelay(row.target, value);
+                              }}
+                            />
+                          </div>
+                        </div>
+                        <p className="text-muted-foreground mt-3 text-xs" role="status">{taskLabel}</p>
+                      </article>
+                    );
+                  })}
+                </div>
               </ScrollArea>
             </section>
 

@@ -109,6 +109,9 @@ function renderApp() {
     tab: (name) => control((element) => element?.props?.id === `workspace-tab-${name}`),
     panelIds: () => all((element) => element?.props?.role === "tabpanel").map((element) => element.props.id),
     taskSwitch: () => control((element) => element?.props?.id === "autoadd"),
+    taskMode: (key) => control((element) => element?.props?.id === `task-mode-${key}`),
+    taskRelease: (key) => control((element) => element?.props?.id === `task-release-${key}`),
+    taskRetry: (key) => control((element) => element?.props?.id === `task-retry-${key}`),
     taskRows: () => all((element) => element?.type === "TableRow").length,
     profileSetupButton: () => control((element) => element?.type === "Button" && element.props.children === "准备独立浏览器"),
     profileEditorButton: () => control((element) => element?.type === "Button" && element.props.children === "打开 Profile 编辑器"),
@@ -153,6 +156,41 @@ test("monitor, Profile, and task pages keep their controls separate", () => {
   app.tab("monitor").onClick();
   assert.deepEqual(app.panelIds(), ["workspace-panel-monitor"]);
   assert.deepEqual(app.pushValues(), ["https://api.day.app/saved-key"]);
+});
+
+test("each task saves release time and retry delay independently", async () => {
+  const app = renderApp();
+  const target = {
+    locale: "zh_CN", storeNumber: "R683", storeTitle: "测试门店",
+    partNumber: "MJYE4CH/A", productName: "测试商品",
+  };
+  const key = "zh_CN|R683|MJYE4CH/A";
+  app.state.settings = { ...app.state.settings, targets: [target], taskPlans: [] };
+  app.state.rows = [{ target, availability: { kind: "out_of_stock" } }];
+  app.tab("tasks").onClick();
+  assert.equal(app.taskMode(key).value, "restock");
+  assert.equal(app.taskRetry(key).value, "3000");
+  assert.equal(app.taskRelease(key).disabled, true);
+
+  app.taskMode(key).onChange({ target: { value: "release" } });
+  await new Promise(setImmediate);
+  assert.equal(app.saved.at(-1).taskPlans[0].mode, "release");
+  assert.equal(app.taskRelease(key).disabled, false);
+
+  app.taskRelease(key).onChange({ target: { value: "2099-01-02T03:04" } });
+  app.taskRelease(key).onBlur({ target: { value: "2099-01-02T03:04" } });
+  await new Promise(setImmediate);
+  assert.equal(app.saved.at(-1).taskPlans[0].releaseAtMs, new Date("2099-01-02T03:04").getTime());
+
+  app.taskRetry(key).onChange({ target: { value: "5000" } });
+  app.taskRetry(key).onBlur({ target: { value: "5000" } });
+  await new Promise(setImmediate);
+  assert.equal(app.saved.at(-1).taskPlans[0].retryDelayMs, 5000);
+
+  const saves = app.saved.length;
+  app.taskRetry(key).onBlur({ target: { value: "500" } });
+  assert.equal(app.saved.length, saves);
+  assert.match(app.alerts().join(" "), /1000–60000/);
 });
 
 test("workspace tabs support keyboard navigation and one tab stop", () => {
