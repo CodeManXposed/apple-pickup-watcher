@@ -19,6 +19,8 @@ use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Manager};
 use tungstenite::{Message, WebSocket};
 
+use crate::payment_bridge::PaymentBridge;
+
 const RELEASES_URL: &str = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
 const VERSION_FILE: &str = "current-version";
 const DEVTOOLS_FILE: &str = "DevToolsActivePort";
@@ -713,6 +715,7 @@ fn cdp_call_with_session(
 fn ensure_extension_loaded(
     browser: &mut WebSocket<TcpStream>,
     extension: &InstalledExtension,
+    preserve_checkout: bool,
 ) -> Result<(), String> {
     let existing = cdp_call(
         browser,
@@ -743,8 +746,21 @@ fn ensure_extension_loaded(
                     )
             });
         if same_path {
-            // 重复 loadUnpacked 会重载扩展，清空 storage.session 中的结账任务关联。
             return Ok(());
+        }
+        if preserve_checkout {
+            // 重载扩展会清空 storage.session；进行中的结账须沿用旧副本。
+            // 下一项任务开始时再加载新版，旧副本仍保留在磁盘上。
+            if loaded
+                .get("path")
+                .and_then(Value::as_str)
+                .is_some_and(|old| previous_trusted_extension(old, &extension.dir, &extension.id))
+            {
+                return Ok(());
+            }
+            return Err(
+                "无法确认正在运行的扩展来源；已保留现有结账会话，请检查独立浏览器扩展".into(),
+            );
         }
     }
     let loaded = cdp_call(
@@ -759,6 +775,84 @@ fn ensure_extension_loaded(
     Ok(())
 }
 
+fn previous_trusted_extension(path: &str, current: &Path, id: &str) -> bool {
+    let (Ok(old), Some(parent)) = (fs::canonicalize(path), current.parent()) else {
+        return false;
+    };
+    let Ok(managed) = fs::canonicalize(parent) else {
+        return false;
+    };
+    if old.parent() == Some(managed.as_path())
+        && old.file_name().is_some_and(|name| {
+            let name = name.to_string_lossy();
+            name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
+        return true;
+    }
+    // 迁移前的扩展可能直接从旧应用包的 Resources 中加载。
+    let Some(resources) = old.parent() else {
+        return false;
+    };
+    let Some(bundle) = resources.parent() else {
+        return false;
+    };
+    if old
+        .file_name()
+        .is_none_or(|name| name != "browser-extension")
+        || resources.file_name().is_none_or(|name| name != "Resources")
+        || bundle.file_name().is_none_or(|name| name != "Contents")
+    {
+        return false;
+    }
+    let Some(app_bundle) = bundle.parent() else {
+        return false;
+    };
+    if app_bundle
+        .file_name()
+        .is_none_or(|name| name != "Apple Bot.app" && name != "Apple Pickup Watcher.app")
+    {
+        return false;
+    }
+    let Ok(bytes) = fs::read(old.join("manifest.json")) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_slice::<Value>(&bytes) else {
+        return false;
+    };
+    if !matches!(
+        manifest.get("name").and_then(Value::as_str),
+        Some("Apple Bot" | "Apple Pickup Watcher")
+    ) {
+        return false;
+    }
+    let key = match manifest.get("key").and_then(Value::as_str) {
+        Some(encoded) => match base64::engine::general_purpose::STANDARD.decode(encoded) {
+            Ok(key) => key,
+            Err(_) => return false,
+        },
+        None => extension_path_bytes(Path::new(path)),
+    };
+    extension_id_from_key(&key) == id
+}
+
+fn checkout_needs_extension(stage: &str) -> bool {
+    matches!(
+        stage,
+        "launched"
+            | "bag"
+            | "checkout"
+            | "guest"
+            | "privacy"
+            | "profile"
+            | "profileAction"
+            | "payment"
+            | "review"
+            | "orderSubmitted"
+            | "paymentLink"
+    )
+}
+
 fn loaded_browser(app: &AppHandle) -> Result<(WebSocket<TcpStream>, InstalledExtension), String> {
     let platform = platform()?;
     let root = root(app)?;
@@ -768,7 +862,11 @@ fn loaded_browser(app: &AppHandle) -> Result<(WebSocket<TcpStream>, InstalledExt
     let profile = root.join("profile");
     fs::create_dir_all(&profile).map_err(|e| format!("建立浏览器资料目录失败：{e}"))?;
     let mut browser = browser_connection(&profile, &binary)?;
-    ensure_extension_loaded(&mut browser, &extension)?;
+    let preserve_checkout = app
+        .try_state::<PaymentBridge>()
+        .and_then(|bridge| bridge.status())
+        .is_some_and(|status| checkout_needs_extension(&status.stage));
+    ensure_extension_loaded(&mut browser, &extension, preserve_checkout)?;
     Ok((browser, extension))
 }
 
@@ -1253,6 +1351,55 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_keeps_only_a_trusted_extension_during_an_active_checkout() {
+        let temp = tempfile::tempdir().unwrap();
+        let versions = temp.path().join("extensions");
+        let old = versions.join("a".repeat(64));
+        let current = versions.join("b".repeat(64));
+        let external = temp.path().join("elsewhere").join("c".repeat(64));
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir_all(&current).unwrap();
+        fs::create_dir_all(&external).unwrap();
+
+        assert!(previous_trusted_extension(
+            old.to_str().unwrap(),
+            &current,
+            "example"
+        ));
+        assert!(!previous_trusted_extension(
+            external.to_str().unwrap(),
+            &current,
+            "example"
+        ));
+        let legacy = temp
+            .path()
+            .join("Apple Pickup Watcher.app/Contents/Resources/browser-extension");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(
+            legacy.join("manifest.json"),
+            r#"{"manifest_version":3,"name":"Apple Pickup Watcher","version":"1"}"#,
+        )
+        .unwrap();
+        let legacy_id = extension_id(&legacy);
+        assert!(previous_trusted_extension(
+            legacy.to_str().unwrap(),
+            &current,
+            &legacy_id
+        ));
+        assert!(!previous_trusted_extension(
+            legacy.to_str().unwrap(),
+            &current,
+            "wrong-id"
+        ));
+        assert!(!checkout_needs_extension("starting"));
+        assert!(!checkout_needs_extension("waitingRoom"));
+        assert!(!checkout_needs_extension("failed"));
+        for stage in ["launched", "bag", "review", "orderSubmitted", "paymentLink"] {
+            assert!(checkout_needs_extension(stage), "{stage}");
+        }
+    }
+
+    #[test]
     fn release_refresh_keeps_the_configured_product_path() {
         let task = reqwest::Url::parse(
             "https://www.apple.com.cn/shop/pdpAddToBag/MJT74CH/A#apw-auto-add=MJT74CH%2FA",
@@ -1489,7 +1636,7 @@ mod tests {
             assert!(Instant::now() < deadline, "Chrome did not open DevTools");
             thread::sleep(Duration::from_millis(100));
         };
-        ensure_extension_loaded(&mut socket, &installed).unwrap();
+        ensure_extension_loaded(&mut socket, &installed, false).unwrap();
         let extensions = cdp_call(
             &mut socket,
             1,
@@ -1621,7 +1768,7 @@ mod tests {
             Some(session),
         )
         .unwrap();
-        ensure_extension_loaded(&mut socket, &installed).unwrap();
+        ensure_extension_loaded(&mut socket, &installed, true).unwrap();
         command_id += 1;
         let flow = cdp_call_with_session(
             &mut socket,
@@ -1636,6 +1783,79 @@ mod tests {
         )
         .unwrap();
         assert_eq!(flow["data"]["apwCheckoutFlow-test"]["phase"], "checkout");
+
+        let next_bundle = temp.path().join("next-browser-extension");
+        fs::create_dir_all(&next_bundle).unwrap();
+        for (relative, bytes) in extension_files(&bundled).unwrap() {
+            let destination = next_bundle.join(&relative);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(destination, bytes).unwrap();
+        }
+        let background = next_bundle.join("background.js");
+        let mut contents = fs::read(&background).unwrap();
+        contents.extend_from_slice(b"\n// disposable upgrade fixture\n");
+        fs::write(background, contents).unwrap();
+        let upgraded = install_extension(&temp.path().join("bot"), &next_bundle).unwrap();
+        assert_eq!(upgraded.id, installed.id);
+        assert_ne!(upgraded.dir, installed.dir);
+
+        ensure_extension_loaded(&mut socket, &upgraded, true).unwrap();
+        let active = cdp_call(
+            &mut socket,
+            1,
+            "Extensions.getExtensions",
+            serde_json::json!({}),
+        )
+        .unwrap();
+        let active_path = active["extensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == installed.id)
+            .unwrap()["path"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            fs::canonicalize(active_path).unwrap(),
+            fs::canonicalize(&installed.dir).unwrap()
+        );
+        command_id += 1;
+        let flow = cdp_call_with_session(
+            &mut socket,
+            command_id,
+            "Extensions.getStorageItems",
+            serde_json::json!({
+                "id": installed.id,
+                "storageArea": "session",
+                "keys": ["apwCheckoutFlow-test"],
+            }),
+            Some(session),
+        )
+        .unwrap();
+        assert_eq!(flow["data"]["apwCheckoutFlow-test"]["phase"], "checkout");
+
+        ensure_extension_loaded(&mut socket, &upgraded, false).unwrap();
+        let active = cdp_call(
+            &mut socket,
+            1,
+            "Extensions.getExtensions",
+            serde_json::json!({}),
+        )
+        .unwrap();
+        let active_path = active["extensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == upgraded.id)
+            .unwrap()["path"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            fs::canonicalize(active_path).unwrap(),
+            fs::canonicalize(&upgraded.dir).unwrap()
+        );
         drop(socket);
         drop(browser);
     }
