@@ -161,6 +161,7 @@ mod task_cancellation_tests {
 
 enum DirectReleaseResult {
     Opened,
+    BrowserFallback(String),
     NoRetry(String),
 }
 
@@ -222,9 +223,10 @@ async fn direct_release_add(
             ));
         }
         AddOutcome::Stop { reason, cookies } => {
+            // Stop 只在发送加车请求前产生；原标签页可安全接管，不会重复加车。
             if cookies.is_empty() {
-                return Ok(DirectReleaseResult::NoRetry(format!(
-                    "{reason}；请在原发售标签页处理验证或等待放行。"
+                return Ok(DirectReleaseResult::BrowserFallback(format!(
+                    "{reason}；已切换到浏览器加车，请在原发售标签页处理验证或等待放行。"
                 )));
             }
             let app_copy = app.clone();
@@ -236,14 +238,14 @@ async fn direct_release_add(
             .await
             .map_err(|err| err.to_string())
             .and_then(|result| result);
-            return Ok(DirectReleaseResult::NoRetry(match handoff {
-                Ok(()) => {
-                    format!("{reason}；已将直连会话交给原发售标签页，请在那里处理验证或等待放行。")
-                }
-                Err(err) => {
-                    format!("{reason}；无法把直连会话交给发售标签页：{err}。请手动检查页面。")
-                }
-            }));
+            return Ok(match handoff {
+                Ok(()) => DirectReleaseResult::BrowserFallback(format!(
+                    "{reason}；已将直连会话交给原发售标签页并切换到浏览器加车，请在那里处理验证或等待放行。"
+                )),
+                Err(err) => DirectReleaseResult::NoRetry(format!(
+                    "{reason}；无法把直连会话交给发售标签页：{err}。请手动检查页面。"
+                )),
+            });
         }
         AddOutcome::Uncertain { reason, cookies } => {
             let inspection = if cookies.is_empty() {
@@ -414,6 +416,7 @@ pub(crate) async fn run(
     }
     let deadline = at.saturating_add(WAIT_LIMIT_MS);
     let mut errors = 0;
+    let mut browser_fallback = false;
     let mut last_missing_refresh: Option<Instant> = None;
     while now_ms() <= deadline {
         if task_cancelled(&app, &task_id, &cancelled) {
@@ -428,7 +431,7 @@ pub(crate) async fn run(
         let stop = cancelled.clone();
         let refresh_missing =
             last_missing_refresh.is_none_or(|last| last.elapsed() >= Duration::from_secs(60));
-        let perform_add = plan.add_method == AddMethod::Browser;
+        let perform_add = plan.add_method == AddMethod::Browser || browser_fallback;
         let result = tauri::async_runtime::spawn_blocking(move || {
             browser_bot::activate_release(
                 &app_copy,
@@ -450,7 +453,7 @@ pub(crate) async fn run(
             last_missing_refresh = Some(Instant::now());
         }
         let result = match result {
-            Ok(true) if plan.add_method == AddMethod::Api => {
+            Ok(true) if plan.add_method == AddMethod::Api && !browser_fallback => {
                 if task_cancelled(&app, &task_id, &cancelled) {
                     fail(&app, &task_id, "发售任务已暂停");
                     return;
@@ -467,6 +470,11 @@ pub(crate) async fn run(
                 .await
                 {
                     Ok(DirectReleaseResult::Opened) => Ok(true),
+                    Ok(DirectReleaseResult::BrowserFallback(message)) => {
+                        browser_fallback = true;
+                        let _ = app.emit(NOTICE_CHANNEL, message);
+                        Ok(false)
+                    }
                     Ok(DirectReleaseResult::NoRetry(err)) => {
                         fail(&app, &task_id, &err);
                         return;
@@ -486,7 +494,7 @@ pub(crate) async fn run(
                     return;
                 }
                 let watchdog_app = app.clone();
-                let watchdog_message = if plan.add_method == AddMethod::Api {
+                let watchdog_message = if plan.add_method == AddMethod::Api && !browser_fallback {
                     "发售任务直连加车已被确认，但购物袋在 90 秒内未完成核对；请检查独立浏览器。"
                 } else {
                     "发售任务已放行，但 90 秒内未确认加车；请检查 Apple 页面。"
