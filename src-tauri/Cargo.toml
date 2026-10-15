@@ -36,3 +36,6 @@ tempfile = "3"
 tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 tokio = { workspace = true, features = ["net", "io-util"] }
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }

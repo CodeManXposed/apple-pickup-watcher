@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use apw_core::notify::{Discord, Notification, NotifyError};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -699,7 +699,7 @@ async fn respond(socket: &mut TcpStream, status: u16, origin: &str, body: &str) 
     let _ = socket.shutdown().await;
 }
 
-async fn handle_connection(app: AppHandle, mut socket: TcpStream) {
+async fn handle_connection<R: Runtime>(app: AppHandle<R>, mut socket: TcpStream) {
     let (route, authorization, body) = match read_request(&mut socket).await {
         Ok(request) => request,
         Err(status) => {
@@ -923,7 +923,7 @@ fn link_matches_task(link: &IncomingLink, status: Option<&BotStatus>) -> bool {
     })
 }
 
-async fn send_discord(app: AppHandle, link: PaymentLink, task_id: String) {
+async fn send_discord<R: Runtime>(app: AppHandle<R>, link: PaymentLink, task_id: String) {
     let state = app.state::<AppState>();
     let settings = state.settings_snapshot();
     if settings.discord_webhook.trim().is_empty() {
@@ -1022,18 +1022,128 @@ async fn send_discord_link(
 mod tests {
     use super::{
         BridgeSession, DiscordDelivery, IncomingLink, IncomingStatus, IncomingTask, PaymentBridge,
-        PaymentLink, link_matches_task, load_session, now, read_request, read_session, respond,
-        send_discord_link, valid_alipay_url, valid_origin, valid_task_status,
+        PaymentLink, handle_connection, link_matches_task, load_session, now, read_request,
+        read_session, respond, send_discord_link, valid_alipay_url, valid_origin,
+        valid_task_status,
     };
+    use crate::AppState;
+    use apw_core::apple::{AppleClient, ClientConfig};
+    use apw_core::catalog::Catalog;
+    use apw_core::config::Settings;
     use apw_core::notify::{Discord, Notification};
+    use apw_core::watcher::{Watcher, WatcherConfig};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
+    use tauri::Manager;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
+
+    #[tokio::test]
+    async fn real_http_bridge_accepts_only_submitted_task_payment_links() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("checkout-session.v1.json");
+        let mut bridge = PaymentBridge::disabled();
+        bridge.token = Some("a".repeat(32));
+        bridge.session_path = Some(path.clone());
+        let task = bridge.start_task("MJYE4CH/A", "R683").unwrap();
+        bridge
+            .advance_task("launched", "MJYE4CH/A", "R683", &task.task_id)
+            .unwrap();
+        app.manage(bridge);
+        let apple = AppleClient::new(ClientConfig::default()).unwrap();
+        let (watcher, _events, _engine) = Watcher::new(apple.clone(), WatcherConfig::default());
+        app.manage(AppState {
+            watcher,
+            client: apple,
+            catalog: Catalog::new(),
+            http: reqwest::Client::new(),
+            browser_install: tokio::sync::Mutex::new(()),
+            settings: std::sync::RwLock::new(Settings::default()),
+            store: None,
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let handle = app.handle().clone();
+        let server = tokio::spawn(async move {
+            for _ in 0..6 {
+                let (socket, _) = listener.accept().await.unwrap();
+                handle_connection(handle.clone(), socket).await;
+            }
+        });
+        let client = reqwest::Client::new();
+        let post = |route: &'static str, body: serde_json::Value| {
+            client
+                .post(format!("{base}{route}"))
+                .header("Origin", format!("chrome-extension://{}", "a".repeat(32)))
+                .bearer_auth("a".repeat(32))
+                .json(&body)
+        };
+        let identity = serde_json::json!({
+            "partNumber": "MJYE4CH/A", "storeNumber": "R683", "taskId": task.task_id,
+        });
+        let check = post("/task-check", identity.clone()).send().await.unwrap();
+        assert_eq!(check.status(), 200);
+        assert_eq!(
+            check.headers()["access-control-allow-origin"],
+            format!("chrome-extension://{}", "a".repeat(32))
+        );
+        let mut payment = identity.clone();
+        payment["kind"] = "qr".into();
+        payment["url"] = "https://qr.alipay.com/fixture".into();
+        assert_eq!(
+            post("/payment-link", payment.clone())
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            409
+        );
+        let mut submitted = identity.clone();
+        submitted["stage"] = "orderSubmitted".into();
+        assert_eq!(
+            post("/task-status", submitted.clone())
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        assert_eq!(
+            post("/task-status", submitted)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            409
+        );
+        assert_eq!(
+            post("/payment-link", payment.clone())
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        payment["kind"] = "cashier".into();
+        payment["url"] = "https://excashier.alipay.com/fixture".into();
+        assert_eq!(
+            post("/payment-link", payment)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        server.await.unwrap();
+        let saved = read_session(&path, now()).unwrap();
+        assert_eq!(saved.status.unwrap().stage, "paymentLink");
+        assert_eq!(saved.latest.unwrap().url, "https://qr.alipay.com/fixture");
+    }
 
     async fn read_webhook_request(socket: &mut TcpStream) -> Vec<u8> {
         let mut bytes = Vec::new();
