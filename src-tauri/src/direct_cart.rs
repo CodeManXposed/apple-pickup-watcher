@@ -45,14 +45,25 @@ fn official_url(input: &str, base: &Url, part: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-fn add_url(product: &Url, part: &str) -> Url {
+fn add_url(product: &Url, part: &str, token: &str) -> Url {
     let mut url = product.clone();
     url.set_fragment(None);
     url.set_query(None);
     url.query_pairs_mut()
         .append_pair("product", part)
+        .append_pair("purchaseOption", "fullPrice")
+        .append_pair("step", "select")
+        .append_pair("atbtoken", token)
         .append_pair("add-to-cart", "add-to-cart");
     url
+}
+
+fn atb_token(cookies: &wreq::cookie::Jar, product: &Url) -> Option<String> {
+    cookies
+        .matches(product.as_str())
+        .find(|cookie| cookie.name() == "as_atb")
+        .and_then(|cookie| cookie.value().split('|').next_back().map(str::to_owned))
+        .filter(|token| !token.is_empty())
 }
 
 fn accepted(url: &Url, part: &str) -> bool {
@@ -159,7 +170,26 @@ impl DirectCart {
                 )));
             }
         };
-        let request = add_url(&canonical, &self.part);
+        // 官网商品页中的信标设置 as_atb Cookie；页面脚本把最后一段作为
+        // atbtoken 加入表单。HTTP 模式也须先加载信标并使用同一会话。
+        let beacon = Url::parse(&format!(
+            "{}/shop/beacon/atb",
+            self.base.as_str().trim_end_matches('/')
+        ))
+        .map_err(|_| "Apple 加车信标地址无效")?;
+        let beacon_response = self.get_following(beacon, Some(&canonical)).await?;
+        if !beacon_response.status().is_success() {
+            return Ok(AddOutcome::Stop(format!(
+                "Apple 加车信标返回 HTTP {}；本轮不再直连重试",
+                beacon_response.status()
+            )));
+        }
+        let Some(token) = atb_token(&self.cookies, &canonical) else {
+            return Ok(AddOutcome::Stop(
+                "Apple 未提供加车验证令牌；本轮不再直连重试".into(),
+            ));
+        };
+        let request = add_url(&canonical, &self.part, &token);
         let response = self.get_following(request, Some(&canonical)).await?;
         if !response.status().is_success() {
             if matches!(response.status().as_u16(), 403 | 429 | 541) {
@@ -263,10 +293,12 @@ mod tests {
     #[test]
     fn request_and_success_require_exact_sku() {
         let url = Url::parse("https://www.apple.com.cn/shop/buy-iphone/x/mjye4ch/a").unwrap();
-        let add = add_url(&url, "MJYE4CH/A");
+        let add = add_url(&url, "MJYE4CH/A", "abc123");
         assert_eq!(
             add.query(),
-            Some("product=MJYE4CH%2FA&add-to-cart=add-to-cart")
+            Some(
+                "product=MJYE4CH%2FA&purchaseOption=fullPrice&step=select&atbtoken=abc123&add-to-cart=add-to-cart"
+            )
         );
         assert!(accepted(
             &Url::parse(
@@ -282,5 +314,14 @@ mod tests {
             .unwrap(),
             "MJYE4CH/A"
         ));
+    }
+
+    #[test]
+    fn atb_token_comes_from_the_last_cookie_segment() {
+        let jar = wreq::cookie::Jar::default();
+        let page = Url::parse("https://www.apple.com.cn/shop/buy-iphone/test").unwrap();
+        assert!(atb_token(&jar, &page).is_none());
+        jar.add("as_atb=prefix|abc123; Path=/; Secure", page.as_str());
+        assert_eq!(atb_token(&jar, &page).as_deref(), Some("abc123"));
     }
 }
