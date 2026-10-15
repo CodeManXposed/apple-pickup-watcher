@@ -211,6 +211,8 @@ test("a new SKU can be added for the selected store before it enters the catalog
   const app = renderApp();
   app.state.stores = [{ number: "R683", title: "环球港" }];
   app.choice("选择自提门店").onChange(["R683"]);
+  app.manualSku().onChange({ target: { value: "A".repeat(21) + "/A" } });
+  assert.equal(app.addManualSku().disabled, true);
   app.manualSku().onChange({ target: { value: " mjt74ch/a " } });
   assert.equal(app.addManualSku().disabled, false);
   app.addManualSku().onClick();

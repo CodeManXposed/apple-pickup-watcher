@@ -80,7 +80,7 @@ async function page({ pathname, hash = '', official = [], candidates = [], phase
 test('marked bag clicks the official checkout button once', async () => {
   const checkout = button('结账', {});
   const applePay = button('Check out with Apple Pay');
-  const item = { href: 'https://www.apple.com.cn/shop/product/mjye4ch/a',
+  const item = { href: 'https://www.apple.com.cn/shop/product/mjye4ch/a', textContent: 'iPhone 18 Pro 256GB 黑色',
     closest() { return { querySelector() { return { value: '1' }; } }; } };
   const result = await page({
     pathname: '/shop/bag', hash: `#apw-checkout=1&apw-store=R683&apw-part=MJYE4CH%2FA&apw-task=${taskId}`,
@@ -96,11 +96,11 @@ test('marked bag clicks the official checkout button once', async () => {
 
 test('bag binds pickup area to the checkout task', async () => {
   const checkout = button('结账', {});
-  const item = { href: 'https://www.apple.com.cn/shop/product/mjye4ch/a',
+  const item = { href: 'https://www.apple.com.cn/shop/product/mjye4ch/a', textContent: 'iPhone 18 Pro 256GB 黑色',
     closest() { return { querySelector() { return { value: '1' }; } }; } };
   const params = new URLSearchParams({
     'apw-checkout': '1', 'apw-store': 'R683', 'apw-part': 'MJYE4CH/A',
-    'apw-task': taskId, 'apw-product': 'iPhone 18 Pro 256GB 黑色',
+    'apw-task': taskId, 'apw-product': 'SKU MJYE4CH/A',
     'apw-province': '上海', 'apw-city': '上海', 'apw-district': '普陀区',
   });
   const result = await page({
@@ -123,6 +123,18 @@ test('bag without the exact target SKU does not enter checkout', async () => {
   });
   assert.equal(checkout.clicks, 0);
   assert.equal(result.phase, null);
+});
+
+test('bag waits for an Apple product name before starting checkout', async () => {
+  const checkout = button('结账', {});
+  const item = { href: 'https://www.apple.com.cn/shop/product/mjye4ch/a', textContent: ' ',
+    closest() { return { querySelector() { return { value: '1' }; } }; } };
+  const result = await page({
+    pathname: '/shop/bag', hash: `#apw-checkout=1&apw-store=R683&apw-part=MJYE4CH%2FA&apw-task=${taskId}`,
+    official: [checkout], selectors: { '[data-autom="bag-item-name"]': [item] },
+  });
+  assert.equal(checkout.clicks, 0);
+  assert.equal(result.sent.some((message) => message.type === 'apw-begin-checkout'), false);
 });
 
 test('bag with extra items or target quantity two does not enter checkout', async () => {

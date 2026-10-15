@@ -91,7 +91,7 @@
       intent.phase = 'failed';
       sessionStorage.setItem(KEY, JSON.stringify(intent));
       clearInterval(timer);
-      notice('Apple 拒绝了加车请求。商品未加入购物袋，请稍后重试。', true);
+      notice('Apple 未确认加车请求。请检查购物袋；本轮已停止，避免重复加车。', true);
       return;
     }
     if (intent.phase === 'submitting' && query.get('step') === 'attach' &&

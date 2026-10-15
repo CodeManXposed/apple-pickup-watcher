@@ -40,7 +40,7 @@ PAGES = {
     "/shop/buy-iphone/test": '''<!doctype html><meta charset="utf-8"><title>配件推荐</title>''',
     "/shop/bag": '''<!doctype html><meta charset="utf-8"><title>购物袋</title>
 <div class="rs-iteminfo-details"><a data-autom="bag-item-name"
- href="/shop/product/MJYE4CH/A">测试商品</a><select data-autom="item-quantity-dropdown">
+ href="/shop/product/MJYE4CH/A">Test Product</a><select data-autom="item-quantity-dropdown">
 <option value="1" selected>1</option></select></div>
 <div class="rs-bag-checkout-mainbutton"><button data-autom="checkout"
  onclick="location.href='/shop/signIn'">结账</button></div>''',
@@ -332,7 +332,7 @@ async def run_browser(page_port, extension, profile, navigation_mode, payment_mo
             await browser.call("Runtime.enable")
             fragment = urlencode({
                 "apw-auto-add": PART, "apw-store": STORE, "apw-task": TASK,
-                "apw-product": "Test Product",
+                "apw-product": f"SKU {PART}",
             })
             await browser.call("Page.navigate", {
                 "url": f"http://127.0.0.1:{page_port}/shop/pdpAddToBag/{PART}#{fragment}",

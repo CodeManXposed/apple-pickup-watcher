@@ -569,7 +569,7 @@ export default function App() {
 
   const canAdd = storeNumbers.length > 0 && selectedProducts.length > 0;
   const normalizedManualSku = manualSku.trim().toUpperCase();
-  const canAddManualSku = storeNumbers.length > 0 && /^[A-Z0-9]{4,}\/[A-Z]$/.test(normalizedManualSku);
+  const canAddManualSku = storeNumbers.length > 0 && /^[A-Z0-9]{4,20}\/[A-Z]$/.test(normalizedManualSku);
 
   async function onAdd() {
     if (!canAdd) return;

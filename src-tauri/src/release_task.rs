@@ -282,6 +282,7 @@ pub(crate) async fn run(
         let id = tab_id.clone();
         let part = target.part_number.clone();
         let url = task_url.clone();
+        let refresh_url = prewarm_url.clone();
         let stop = cancelled.clone();
         let refresh_missing =
             last_missing_refresh.is_none_or(|last| last.elapsed() >= Duration::from_secs(60));
@@ -291,7 +292,10 @@ pub(crate) async fn run(
                 &app_copy,
                 &id,
                 &part,
-                &url,
+                browser_bot::ReleaseUrls {
+                    task: &url,
+                    refresh: &refresh_url,
+                },
                 refresh_missing,
                 perform_add,
                 &stop,

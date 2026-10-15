@@ -9,7 +9,6 @@
   const storeNumber = params.get('apw-store');
   const partNumber = (params.get('apw-part') || '').toUpperCase();
   const taskId = params.get('apw-task');
-  const productName = params.get('apw-product');
   const area = Object.fromEntries(['province', 'city', 'district'].map((key) => [key, params.get(`apw-${key}`)]));
   const ORDER_CONFIG_KEY = 'apwOrderConfig';
   const GUEST_TEXT = /^(?:(?:以访客身份|以游客身份)(?:继续|结[账帐]|购买)|(?:继续)?以访客身份结[账帐]|访客结[账帐]|访客继续|continue as (?:a )?guest|guest checkout)$/i;
@@ -88,7 +87,12 @@
         .endsWith(`/SHOP/PRODUCT/${partNumber}`)) return 'other-items';
     } catch { return 'invalid'; }
     const quantity = item.closest('.rs-iteminfo-details')?.querySelector('[data-autom="item-quantity-dropdown"]');
-    return quantity?.value === '1' ? 'ready' : 'quantity';
+    return quantity?.value === '1' ? (bagItemName(item) ? 'ready' : 'loading') : 'quantity';
+  }
+
+  function bagItemName(item) {
+    const name = (item?.textContent || '').trim().replace(/\s+/g, ' ');
+    return name && name.length <= 160 && !/[\u0000-\u001f\u007f]/.test(name) ? name : null;
   }
 
   function guestButton() {
@@ -418,7 +422,9 @@
       }
     }
     if (markedBag && !begun) {
-      const started = await chrome.runtime.sendMessage({ type: 'apw-begin-checkout', storeNumber, partNumber, taskId, productName, area });
+      const verifiedName = bagItemName(document.querySelector('[data-autom="bag-item-name"]'));
+      if (!verifiedName) return;
+      const started = await chrome.runtime.sendMessage({ type: 'apw-begin-checkout', storeNumber, partNumber, taskId, productName: verifiedName, area });
       if (!started) {
         done = true;
         notice('无法确认当前监控任务或连接桌面应用，已停止自动结账。', true);

@@ -1027,13 +1027,40 @@ pub(crate) fn prewarm_task(app: &AppHandle, url: &str) -> Result<String, String>
     launch(app, Some(url))
 }
 
+fn release_refresh_url(
+    intended: &reqwest::Url,
+    refresh_url: &str,
+    part_number: &str,
+) -> Result<reqwest::Url, String> {
+    let mut refresh =
+        reqwest::Url::parse(refresh_url).map_err(|_| "发售商品地址无效".to_owned())?;
+    if refresh.scheme() != "https"
+        || refresh.host_str() != intended.host_str()
+        || !refresh.path().contains("/shop/")
+        || !refresh
+            .path()
+            .to_ascii_uppercase()
+            .ends_with(&format!("/{}", part_number.to_ascii_uppercase()))
+    {
+        return Err("发售商品地址与任务 SKU 或地区不符".into());
+    }
+    refresh.set_query(None);
+    refresh.set_fragment(None);
+    Ok(refresh)
+}
+
+pub(crate) struct ReleaseUrls<'a> {
+    pub task: &'a str,
+    pub refresh: &'a str,
+}
+
 /// 发售等待页放行后，在原标签页启动加车脚本，保留排队和验证所用的浏览器会话。
 /// 页面尚未出现目标 SKU 的官方加车表单时只返回 false，不尝试绕过等待页。
 pub(crate) fn activate_release(
     app: &AppHandle,
     target_id: &str,
     part_number: &str,
-    task_url: &str,
+    urls: ReleaseUrls<'_>,
     refresh_missing: bool,
     perform_add: bool,
     cancelled: &AtomicBool,
@@ -1052,7 +1079,8 @@ pub(crate) fn activate_release(
         .as_str()
         .ok_or("独立浏览器中的发售标签页已关闭")?;
     let current = reqwest::Url::parse(current).map_err(|_| "发售标签页地址无效".to_owned())?;
-    let intended = reqwest::Url::parse(task_url).map_err(|_| "任务地址无效".to_owned())?;
+    let intended = reqwest::Url::parse(urls.task).map_err(|_| "任务地址无效".to_owned())?;
+    let refresh = release_refresh_url(&intended, urls.refresh, part_number)?;
     if current.scheme() != "https"
         || current.host_str() != intended.host_str()
         || !current.path().contains("/shop/")
@@ -1072,13 +1100,11 @@ pub(crate) fn activate_release(
             .is_some_and(|title| title.starts_with("Page Not Found"));
     if not_found {
         if refresh_missing && !cancelled.load(Ordering::SeqCst) {
-            let mut retry_url = intended.clone();
-            retry_url.set_fragment(None);
             cdp_call_with_session(
                 &mut browser,
                 4,
                 "Page.navigate",
-                serde_json::json!({"url": retry_url.as_str()}),
+                serde_json::json!({"url": refresh.as_str()}),
                 Some(session),
             )?;
         }
@@ -1132,6 +1158,32 @@ pub(crate) fn open_profile(app: &AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_refresh_keeps_the_configured_product_path() {
+        let task = reqwest::Url::parse(
+            "https://www.apple.com.cn/shop/pdpAddToBag/MJT74CH/A#apw-auto-add=MJT74CH%2FA",
+        )
+        .unwrap();
+        let refresh = release_refresh_url(
+            &task,
+            "https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro/MJT74CH/A?step=select#old",
+            "MJT74CH/A",
+        )
+        .unwrap();
+        assert_eq!(
+            refresh.as_str(),
+            "https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro/MJT74CH/A"
+        );
+        assert!(
+            release_refresh_url(
+                &task,
+                "https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro/OTHERCH/A",
+                "MJT74CH/A"
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn checkout_preflight_requires_paired_and_complete_pickup_profile() {
