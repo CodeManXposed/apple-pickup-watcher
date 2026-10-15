@@ -957,22 +957,27 @@ async fn send_discord(app: AppHandle, link: PaymentLink, task_id: String) {
             break;
         }
         let previous = delivery.message_id(index).map(str::to_owned);
-        let result = discord
-            .send_or_edit(&notification, previous.as_deref())
-            .await;
+        let result = send_discord_link(&discord, &notification, previous.as_deref(), || {
+            bridge.is_current_link(&link, &task_id)
+        })
+        .await;
         let result = if previous.is_some()
             && matches!(&result, Err(NotifyError::Rejected { status: 404, .. }))
         {
             // 用户删除了旧消息时，新建一条继续提供当前付款链接。
-            discord.send_or_edit(&notification, None).await
+            send_discord_link(&discord, &notification, None, || {
+                bridge.is_current_link(&link, &task_id)
+            })
+            .await
         } else {
             result
         };
         match result {
-            Ok(message_id) => {
+            Ok(Some(message_id)) => {
                 delivery.record(index, message_id);
                 delivered += 1;
             }
+            Ok(None) => break,
             Err(err) => {
                 let _ = app.emit(
                     NOTICE_CHANNEL,
@@ -989,18 +994,146 @@ async fn send_discord(app: AppHandle, link: PaymentLink, task_id: String) {
     }
 }
 
+async fn send_discord_link(
+    discord: &Discord,
+    notification: &Notification,
+    previous: Option<&str>,
+    is_current: impl Fn() -> bool,
+) -> Result<Option<String>, NotifyError> {
+    for attempt in 0..3 {
+        if !is_current() {
+            return Ok(None);
+        }
+        match discord.send_or_edit(notification, previous).await {
+            Err(NotifyError::Rejected {
+                status: 429,
+                retry_after: Some(delay),
+                ..
+            }) if attempt < 2 && delay <= Duration::from_secs(10) => {
+                tokio::time::sleep(delay).await;
+            }
+            result => return result.map(Some),
+        }
+    }
+    unreachable!("the final attempt always returns")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         BridgeSession, DiscordDelivery, IncomingLink, IncomingStatus, IncomingTask, PaymentBridge,
         PaymentLink, link_matches_task, load_session, now, read_request, read_session, respond,
-        valid_alipay_url, valid_origin, valid_task_status,
+        send_discord_link, valid_alipay_url, valid_origin, valid_task_status,
     };
+    use apw_core::notify::{Discord, Notification};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
+
+    async fn read_webhook_request(socket: &mut TcpStream) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 2048];
+        loop {
+            let count = socket.read(&mut chunk).await.unwrap();
+            assert!(count > 0, "webhook request ended before its body");
+            bytes.extend_from_slice(&chunk[..count]);
+            if let Some(header_end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                let header_end = header_end + 4;
+                let header = String::from_utf8_lossy(&bytes[..header_end]);
+                let content_length = header
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':').and_then(|(name, value)| {
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                    })
+                    .unwrap_or(0);
+                if bytes.len() >= header_end + content_length {
+                    return bytes;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn discord_payment_link_retries_a_rate_limit_once() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for (status, headers, body) in [
+                (
+                    "429 Too Many Requests",
+                    "Retry-After: 0.01\r\n",
+                    r#"{"retry_after":0.01}"#,
+                ),
+                ("200 OK", "", r#"{"id":"123456"}"#),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_webhook_request(&mut socket).await;
+                assert!(
+                    String::from_utf8_lossy(&request)
+                        .starts_with("POST /api/webhooks/123/token?wait=true ")
+                );
+                let response = format!(
+                    "HTTP/1.1 {status}\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let discord = Discord::new(
+            format!("http://{addr}/api/webhooks/123/token"),
+            reqwest::Client::new(),
+        );
+        let notice = Notification::new("Apple 支付宝付款链接", "付款链接")
+            .with_url("https://qr.alipay.com/test");
+        let delivered = send_discord_link(&discord, &notice, None, || true)
+            .await
+            .unwrap();
+        assert_eq!(delivered.as_deref(), Some("123456"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn discord_payment_link_drops_a_stale_retry() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let current = Arc::new(AtomicBool::new(true));
+        let server_current = current.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_webhook_request(&mut socket).await;
+            server_current.store(false, Ordering::SeqCst);
+            let body = r#"{"retry_after":0.01}"#;
+            let response = format!(
+                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err()
+            );
+        });
+        let discord = Discord::new(
+            format!("http://{addr}/api/webhooks/123/token"),
+            reqwest::Client::new(),
+        );
+        let notice = Notification::new("Apple 支付宝付款链接", "过期链接")
+            .with_url("https://qr.alipay.com/old");
+        let result = send_discord_link(&discord, &notice, None, || current.load(Ordering::SeqCst))
+            .await
+            .unwrap();
+        assert!(result.is_none());
+        server.await.unwrap();
+    }
 
     fn persistent_bridge(path: &Path, session: BridgeSession) -> PaymentBridge {
         let mut bridge = PaymentBridge::disabled();

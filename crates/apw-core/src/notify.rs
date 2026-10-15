@@ -105,6 +105,8 @@ pub enum NotifyError {
         channel: String,
         status: u16,
         body: String,
+        /// 仅明确限流时用于延迟重试，不把未确认送达的请求盲目重发。
+        retry_after: Option<Duration>,
     },
 
     /// 服务器回了 200，但在响应体里报了业务错误。
@@ -270,6 +272,7 @@ impl Notifier for Bark {
                 channel: self.name.clone(),
                 status: status.as_u16(),
                 body: summarize(&body),
+                retry_after: None,
             });
         }
 
@@ -603,6 +606,7 @@ impl Notifier for Feishu {
                 channel: self.name.clone(),
                 status: status.as_u16(),
                 body: summarize(&body),
+                retry_after: None,
             });
         }
 
@@ -687,6 +691,26 @@ fn feishu_business_error(body: &[u8]) -> Option<(i64, String)> {
 
 const DISCORD: &str = "Discord";
 const DISCORD_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn discord_retry_after(headers: &reqwest::header::HeaderMap, body: &[u8]) -> Option<Duration> {
+    let duration = |seconds: f64| {
+        // 异常的等待值由调用方报告，不把付款链接发送任务挂上数小时。
+        (seconds.is_finite() && (0.0..=3_600.0).contains(&seconds))
+            .then(|| Duration::from_secs_f64(seconds))
+    };
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<f64>().ok())
+        .and_then(duration)
+        .or_else(|| {
+            serde_json::from_slice::<serde_json::Value>(body)
+                .ok()?
+                .get("retry_after")?
+                .as_f64()
+                .and_then(duration)
+        })
+}
 
 /// 向 Discord webhook 发送普通文本通知。
 #[derive(Debug, Clone)]
@@ -798,12 +822,16 @@ impl Discord {
             })))
             .await?;
         let status = response.status();
+        let retry_header = response.headers().clone();
         let body = read_capped(&mut response, BARK_MAX_BODY, &self.name).await?;
         if !status.is_success() {
             return Err(NotifyError::Rejected {
                 channel: self.name.clone(),
                 status: status.as_u16(),
                 body: summarize(&body),
+                retry_after: (status == reqwest::StatusCode::TOO_MANY_REQUESTS)
+                    .then(|| discord_retry_after(&retry_header, &body))
+                    .flatten(),
             });
         }
         if let Some(id) = message_id {
@@ -867,12 +895,16 @@ impl Notifier for Discord {
         let mut resp = self.send_request(request).await?;
 
         let status = resp.status();
+        let retry_header = resp.headers().clone();
         let body = read_capped(&mut resp, BARK_MAX_BODY, &self.name).await?;
         if !status.is_success() {
             return Err(NotifyError::Rejected {
                 channel: self.name.clone(),
                 status: status.as_u16(),
                 body: summarize(&body),
+                retry_after: (status == reqwest::StatusCode::TOO_MANY_REQUESTS)
+                    .then(|| discord_retry_after(&retry_header, &body))
+                    .flatten(),
             });
         }
         Ok(())
@@ -1350,6 +1382,34 @@ impl Notifier for Multi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discord_rate_limit_waits_for_header_or_body_without_accepting_bad_values() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "0.25".parse().unwrap());
+        assert_eq!(
+            discord_retry_after(&headers, br#"{"retry_after":1.5}"#),
+            Some(Duration::from_millis(250))
+        );
+        headers.clear();
+        assert_eq!(
+            discord_retry_after(&headers, br#"{"retry_after":1.5}"#),
+            Some(Duration::from_millis(1_500))
+        );
+        assert_eq!(
+            discord_retry_after(&headers, br#"{"retry_after":-1}"#),
+            None
+        );
+        assert_eq!(
+            discord_retry_after(&headers, br#"{"retry_after":99999}"#),
+            None
+        );
+        headers.insert(reqwest::header::RETRY_AFTER, "-1".parse().unwrap());
+        assert_eq!(
+            discord_retry_after(&headers, br#"{"retry_after":0.5}"#),
+            Some(Duration::from_millis(500))
+        );
+    }
 
     fn n(title: &str, body: &str) -> Notification {
         Notification::new(title, body)
