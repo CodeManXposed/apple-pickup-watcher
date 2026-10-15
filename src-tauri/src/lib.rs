@@ -540,11 +540,37 @@ async fn open_auto_add(
                     async {
                         let region = region_by_locale(&target.locale).ok_or("任务地区无效")?;
                         let session = direct_cart::DirectCart::new(region, target, plan.as_ref())?;
+                        let host = reqwest::Url::parse(region.base_url)
+                            .map_err(|_| "地区官网 URL 无效")?
+                            .host_str()
+                            .ok_or("地区官网缺少域名")?
+                            .to_owned();
+                        let app_copy = app.clone();
+                        match tauri::async_runtime::spawn_blocking(move || {
+                            browser_bot::apple_cookies(&app_copy, &host)
+                        })
+                        .await
+                        {
+                            Ok(Ok(cookies)) => session.seed_browser_cookies(&cookies),
+                            Ok(Err(err)) => {
+                                let _ = app.emit(NOTICE_CHANNEL, format!("读取独立浏览器 Apple 会话失败：{err}；本轮使用新 HTTP 会话"));
+                            }
+                            Err(err) => {
+                                let _ = app.emit(NOTICE_CHANNEL, format!("读取独立浏览器 Apple 会话中断：{err}；本轮使用新 HTTP 会话"));
+                            }
+                        }
                         let cookies = match session.add().await? {
                             direct_cart::AddOutcome::Confirmed(cookies) => cookies,
                             direct_cart::AddOutcome::Stop(reason) => {
                                 api_stop_retries = true;
-                                return Err(reason);
+                                let inspection = browser_bot::open_task(
+                                    app,
+                                    session.product_page().as_str(),
+                                );
+                                return Err(match inspection {
+                                    Ok(()) => format!("{reason}；已在独立浏览器打开商品页供你处理验证或等待放行。本轮不会自动重试加车。"),
+                                    Err(err) => format!("{reason}；无法打开独立浏览器商品页：{err}。本轮不会自动重试加车。"),
+                                });
                             }
                             direct_cart::AddOutcome::Uncertain { reason, cookies } => {
                                 api_stop_retries = true;

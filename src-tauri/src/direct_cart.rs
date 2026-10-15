@@ -139,6 +139,10 @@ fn accepted(url: &Url, part: &str) -> bool {
 }
 
 impl DirectCart {
+    pub(crate) fn product_page(&self) -> &Url {
+        &self.product
+    }
+
     fn session_cookies(&self) -> Vec<SessionCookie> {
         let Some(host) = self.bag.host_str() else {
             return Vec::new();
