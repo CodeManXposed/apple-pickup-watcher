@@ -692,4 +692,46 @@ mod tests {
             AddOutcome::Uncertain { reason, .. } => panic!("Apple did not confirm add: {reason}"),
         }
     }
+
+    #[tokio::test]
+    #[ignore = "reads a real Apple product page and beacon without adding to bag"]
+    async fn live_direct_product_diagnostic() {
+        let part =
+            std::env::var("APW_LIVE_PRODUCT_PART").expect("set APW_LIVE_PRODUCT_PART to a SKU");
+        let cn = region_by_locale("zh_CN").unwrap();
+        let target = Target {
+            locale: "zh_CN".into(),
+            store_number: "R683".into(),
+            store_title: "测试门店".into(),
+            part_number: part,
+            product_name: "测试商品".into(),
+            companion_part: None,
+            pickup_location: None,
+        };
+        let session = DirectCart::new(cn, &target, None).unwrap();
+        let response = session
+            .get_following(session.product.clone(), None, RequestKind::Product)
+            .await
+            .unwrap();
+        println!("product_status={}", response.status().as_u16());
+        println!("product_path={}", response.uri().path());
+        if !response.status().is_success() {
+            return;
+        }
+        let canonical = official_url(&response.uri().to_string(), &session.base, &session.part)
+            .expect("Apple product redirect should preserve the SKU");
+        let beacon = session
+            .base
+            .join("shop/beacon/atb")
+            .expect("Apple beacon URL should be valid");
+        let response = session
+            .get_following(beacon, Some(&canonical), RequestKind::Beacon)
+            .await
+            .unwrap();
+        println!("beacon_status={}", response.status().as_u16());
+        println!(
+            "atb_token_present={}",
+            atb_token(&session.cookies, &canonical).is_some()
+        );
+    }
 }
