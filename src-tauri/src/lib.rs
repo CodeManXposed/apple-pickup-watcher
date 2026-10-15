@@ -559,6 +559,26 @@ fn emit_system_notification(app: &AppHandle, n: &Notification) {
     }
 }
 
+async fn open_task_browser(app: &AppHandle, url: reqwest::Url) -> Result<(), String> {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || browser_bot::open_task(&app, url.as_str()))
+        .await
+        .map_err(|err| format!("浏览器任务中断：{err}"))?
+}
+
+async fn open_direct_bag_browser(
+    app: &AppHandle,
+    url: String,
+    cookies: Vec<browser_bot::SessionCookie>,
+) -> Result<(), String> {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        browser_bot::open_direct_bag(&app, &url, &cookies, None)
+    })
+    .await
+    .map_err(|err| format!("浏览器购物袋交接中断：{err}"))?
+}
+
 async fn open_auto_add(
     app: &AppHandle,
     gate: &mut AutoOpenBag,
@@ -596,8 +616,15 @@ async fn open_auto_add(
             let mut api_add_confirmed = false;
             let mut api_stop_retries = false;
             let result = match add_method {
-                AddMethod::Browser => browser_task_url(&url, &task_id, &target.product_name, area)
-                    .and_then(|task_url| browser_bot::open_task(app, task_url.as_str())),
+                AddMethod::Browser => match browser_task_url(
+                    &url,
+                    &task_id,
+                    &target.product_name,
+                    area,
+                ) {
+                    Ok(task_url) => open_task_browser(app, task_url).await,
+                    Err(err) => Err(err),
+                },
                 AddMethod::Api => {
                     async {
                         let region = region_by_locale(&target.locale).ok_or("任务地区无效")?;
@@ -625,10 +652,8 @@ async fn open_auto_add(
                             direct_cart::AddOutcome::Confirmed(cookies) => cookies,
                             direct_cart::AddOutcome::Stop(reason) => {
                                 api_stop_retries = true;
-                                let inspection = browser_bot::open_task(
-                                    app,
-                                    session.product_page().as_str(),
-                                );
+                                let inspection =
+                                    open_task_browser(app, session.product_page().clone()).await;
                                 return Err(match inspection {
                                     Ok(()) => format!("{reason}；已在独立浏览器打开商品页供你处理验证或等待放行。本轮不会自动重试加车。"),
                                     Err(err) => format!("{reason}；无法打开独立浏览器商品页：{err}。本轮不会自动重试加车。"),
@@ -639,12 +664,7 @@ async fn open_auto_add(
                                 let inspection = if cookies.is_empty() {
                                     Err("会话没有可交接的 Apple Cookie".to_owned())
                                 } else {
-                                    browser_bot::open_direct_bag(
-                                        app,
-                                        &region.bag_url(),
-                                        &cookies,
-                                        None,
-                                    )
+                                    open_direct_bag_browser(app, region.bag_url(), cookies).await
                                 };
                                 return Err(match inspection {
                                     Ok(()) => format!(
@@ -666,7 +686,7 @@ async fn open_auto_add(
                         );
                         let checkout =
                             browser_task_url(&bag, &task_id, &target.product_name, area)?;
-                        browser_bot::open_direct_bag(app, checkout.as_str(), &cookies, None)
+                        open_direct_bag_browser(app, checkout.to_string(), cookies).await
                     }
                     .await
                 }
@@ -815,16 +835,13 @@ mod retry_target_tests {
     }
 }
 
-/// 消费引擎事件：转发给前端，并在有货时发提醒。
+/// 先转发库存事件与提醒；购买任务即使等 Apple 或 Chrome，也不能阻塞后续目标的通知。
 async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Event>) {
-    let mut auto_open_bag = AutoOpenBag::default();
-    let mut watch_running = false;
-    let mut auto_add_enabled = app.state::<AppState>().settings_snapshot().auto_add_to_bag;
-    let mut pending_retry: Option<Target> = None;
-    let mut retry_at: Option<Instant> = None;
-    let mut latest_snapshot: Vec<TargetState> = Vec::new();
-    let mut release_cancel: Option<std::sync::Arc<AtomicBool>> = None;
-    let mut task_tick = tokio::time::interval(Duration::from_secs(1));
+    let (automation, pending_automation) = tokio::sync::mpsc::unbounded_channel();
+    let automation_app = app.clone();
+    let automation_task =
+        tauri::async_runtime::spawn(run_automation(automation_app, pending_automation));
+
     let (notifications, pending) = notification_queue::channel();
     let notification_app = app.clone();
     tauri::async_runtime::spawn(notification_queue::run(pending, move |notification| {
@@ -836,6 +853,60 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
         }
     }));
 
+    let mut automation_available = true;
+    while let Some(event) = events.recv().await {
+        let _ = app.emit(EVENT_CHANNEL, &event);
+        let notification = if let Event::InStock { state } = &event {
+            let target = &state.target;
+            let settings = app.state::<AppState>().settings_snapshot();
+            let notification = Notification::new(
+                "有货了",
+                format!("{} {}", target.store_title, target.product_name),
+            );
+            Some(match region_by_locale(&target.locale) {
+                Some(region) if settings.auto_add_to_bag => notification.with_url(
+                    region
+                        .product_page_url(&target.part_number)
+                        .unwrap_or_else(|| region.bag_url()),
+                ),
+                Some(region) => notification.with_url(region.bag_url()),
+                None => notification,
+            })
+        } else {
+            None
+        };
+        if automation_available
+            && matches!(
+                &event,
+                Event::RunStateChanged { .. } | Event::InStock { .. } | Event::CycleComplete { .. }
+            )
+            && automation.send(event).is_err()
+        {
+            automation_available = false;
+            let _ = app.emit(
+                NOTICE_CHANNEL,
+                "自动任务处理已停止；库存事件与提醒仍会继续。",
+            );
+        }
+        if let Some(notification) = notification
+            && notifications.send(notification).await.is_err()
+        {
+            let _ = app.emit(NOTICE_CHANNEL, "提醒发送任务已停止，无法发送到货提醒");
+        }
+    }
+    automation_task.abort();
+}
+
+/// 自动任务按库存事件顺序执行，保留单次加车及有限重试语义。
+async fn run_automation(app: AppHandle, mut events: tokio::sync::mpsc::UnboundedReceiver<Event>) {
+    let mut auto_open_bag = AutoOpenBag::default();
+    let mut watch_running = false;
+    let mut auto_add_enabled = app.state::<AppState>().settings_snapshot().auto_add_to_bag;
+    let mut pending_retry: Option<Target> = None;
+    let mut retry_at: Option<Instant> = None;
+    let mut latest_snapshot: Vec<TargetState> = Vec::new();
+    let mut release_cancel: Option<std::sync::Arc<AtomicBool>> = None;
+    let mut task_tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         let event = tokio::select! {
             event = events.recv() => event,
@@ -899,10 +970,6 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
             }
         };
         let Some(event) = event else { break };
-        // 先原样转发。前端拿到的事件流应当与引擎发出的完全一致，
-        // 中间少一层可能出错的翻译。
-        let _ = app.emit(EVENT_CHANNEL, &event);
-
         if let Event::RunStateChanged { running } = &event {
             if !running && let Some(cancel) = release_cancel.take() {
                 cancel.store(true, Ordering::SeqCst);
@@ -916,10 +983,6 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
 
         if let Event::InStock { state } = &event {
             let target = &state.target;
-            let notification = Notification::new(
-                "有货了",
-                format!("{} {}", target.store_title, target.product_name),
-            );
             let settings = app
                 .try_state::<AppState>()
                 .map(|s| s.settings_snapshot())
@@ -930,27 +993,12 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
             }
             auto_add_enabled = settings.auto_add_to_bag;
 
-            let notification = match region_by_locale(&target.locale) {
-                Some(region) if settings.auto_add_to_bag => notification.with_url(
-                    region
-                        .product_page_url(&target.part_number)
-                        .unwrap_or_else(|| region.bag_url()),
-                ),
-                Some(region) => notification.with_url(region.bag_url()),
-                None => notification,
-            };
-
             if settings.auto_add_to_bag
                 && region_by_locale(&target.locale)
                     .and_then(|r| r.auto_add_url(&target.part_number))
                     .is_none()
             {
                 let _ = app.emit(NOTICE_CHANNEL, "零件号无效，已跳过该目标的自动加车");
-            }
-
-            // 浏览器启动可能耗时数秒；先交给独立通知任务，避免耽误到货提醒。
-            if notifications.send(notification).await.is_err() {
-                let _ = app.emit(NOTICE_CHANNEL, "提醒发送任务已停止，无法发送到货提醒");
             }
 
             if !watch_running {
