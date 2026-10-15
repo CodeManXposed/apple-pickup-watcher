@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -30,6 +31,7 @@ QR = "https://qr.alipay.com/apw-local-test-only"
 PAGE_HITS = []
 BRIDGE_REQUESTS = []
 BRIDGE_RESPONSES = []
+BRIDGE_ORIGINS = []
 LATEST_PAYMENT = None
 TEST_PAYMENT_MODE = ""
 TEST_DELAY_TASK_CHECK = False
@@ -117,6 +119,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         global LATEST_PAYMENT
+        BRIDGE_ORIGINS.append(self.headers.get("Origin"))
         raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         payload = json.loads(raw)
         duplicate_order_stage = self.path == "/task-status" and payload.get("stage") == "orderSubmitted" and any(
@@ -454,6 +457,7 @@ async def main():
             PAGE_HITS.clear()
             BRIDGE_REQUESTS.clear()
             BRIDGE_RESPONSES.clear()
+            BRIDGE_ORIGINS.clear()
             LATEST_PAYMENT = None
             TEST_PAYMENT_MODE = payment_mode
             TEST_DELAY_TASK_CHECK = navigation_mode == "delayed task"
@@ -492,6 +496,10 @@ async def main():
                     handoff_delay_ms=4000 if navigation_mode == "noopener delayed tab" else 0,
                 )
                 await run_browser(pages.server_address[1], extension, profile, navigation_mode, payment_mode)
+                assert BRIDGE_ORIGINS and all(
+                    re.fullmatch(r"chrome-extension://[a-p]{32}", origin or "")
+                    for origin in BRIDGE_ORIGINS
+                ), (navigation_mode, payment_mode, BRIDGE_ORIGINS)
     finally:
         pages.shutdown()
         bridge.shutdown()
