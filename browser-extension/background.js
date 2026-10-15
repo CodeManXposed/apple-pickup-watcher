@@ -23,16 +23,24 @@ function applePage(url) {
 async function flowFor(tabId) {
   const key = `${FLOW_PREFIX}${tabId}`;
   let flow = (await chrome.storage.session.get(key))[key];
-  const parentId = (await chrome.storage.session.get(`${PARENT_PREFIX}${tabId}`))[`${PARENT_PREFIX}${tabId}`];
-  if (Number.isInteger(parentId)) {
+  let currentId = tabId;
+  const visited = new Set([tabId]);
+  // Apple 可能先打开商店中转标签，再由它打开支付宝。每一跳都只能继承
+  // 同一次任务；订单阶段以仍可找到的上游最新状态为准。
+  for (let depth = 0; depth < 8; depth++) {
+    const parentId = (await chrome.storage.session.get(`${PARENT_PREFIX}${currentId}`))[`${PARENT_PREFIX}${currentId}`];
+    if (!Number.isInteger(parentId) || visited.has(parentId)) break;
+    visited.add(parentId);
     const parent = (await chrome.storage.session.get(`${FLOW_PREFIX}${parentId}`))[`${FLOW_PREFIX}${parentId}`];
     if (parent && (!flow || parent.startedAt === flow.startedAt && parent.phase === 'order-submitted')) {
       flow = parent;
     }
+    currentId = parentId;
   }
   if (!flow) return null;
   if (Date.now() - flow.startedAt <= FLOW_TTL_MS) return flow;
   await chrome.storage.session.remove(key);
+  await chrome.storage.session.remove(`${PARENT_PREFIX}${tabId}`);
   return null;
 }
 
@@ -254,6 +262,11 @@ chrome.webNavigation.onCreatedNavigationTarget.addListener((details) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  chrome.storage.session.remove(`${FLOW_PREFIX}${tabId}`).catch(() => {});
-  chrome.storage.session.remove(`${PARENT_PREFIX}${tabId}`).catch(() => {});
+  // 付款标签可能比来源标签更晚完成任务阶段同步。保留已进入访客结账的
+  // 来源身份，供付款页在一小时有效期内追溯；其他阶段立即清理。
+  flowFor(tabId).then(async (flow) => {
+    if (flow && ['guest-clicked', 'order-submitted'].includes(flow.phase)) return;
+    await chrome.storage.session.remove(`${FLOW_PREFIX}${tabId}`);
+    await chrome.storage.session.remove(`${PARENT_PREFIX}${tabId}`);
+  }).catch(() => {});
 });

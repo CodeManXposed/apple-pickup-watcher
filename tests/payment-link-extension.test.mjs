@@ -11,17 +11,19 @@ const alipay = 'https://excashier.alipay.com/payment.htm?order=123';
 const taskId = 'b'.repeat(32);
 
 function background({ taskActive = true } = {}) {
+  let clockTime = Date.now();
   const session = new Map();
   const local = new Map([['apwBridgeToken', 'a'.repeat(32)]]);
   const requests = [];
   let onMessage;
   let onCreated;
+  let onRemoved;
   let onNavigationTarget;
   const chrome = {
     runtime: { onMessage: { addListener(listener) { onMessage = listener; } } },
     tabs: {
       onCreated: { addListener(listener) { onCreated = listener; } },
-      onRemoved: { addListener() {} },
+      onRemoved: { addListener(listener) { onRemoved = listener; } },
     },
     webNavigation: {
       onCreatedNavigationTarget: { addListener(listener) { onNavigationTarget = listener; } },
@@ -38,7 +40,7 @@ function background({ taskActive = true } = {}) {
     },
   };
   vm.runInNewContext(script, {
-    chrome, URL, Date, AbortSignal,
+    chrome, URL, Date: { now: () => clockTime }, AbortSignal,
     async fetch(url, options) {
       requests.push({ url, options });
       if (url.endsWith('/task-check')) return { ok: taskActive };
@@ -53,7 +55,9 @@ function background({ taskActive = true } = {}) {
   }
   return {
     send, requests, local,
+    advance(milliseconds) { clockTime += milliseconds; },
     createTab(tab) { onCreated(tab); },
+    removeTab(tabId) { onRemoved(tabId); },
     navigationTarget(details) { onNavigationTarget(details); },
   };
 }
@@ -205,6 +209,54 @@ test('a noopener Apple relay keeps the checkout identity until Alipay opens', as
   assert.equal((await app.send({ type: 'apw-get-checkout' }, alipay, 2))?.phase, 'order-submitted');
   assert.equal(await app.send({ type: 'apw-get-checkout' }, alipay, 3), null);
   assert.equal((await app.send({ type: 'apw-payment-link', kind: 'cashier', url: alipay }, alipay, 2))?.ok, true);
+});
+
+test('payment tab retains the order phase when its Apple source closes during submission', async () => {
+  const app = background();
+  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A', taskId }, apple);
+  await app.send({ type: 'apw-checkout-step', phase: 'bag-clicked' }, apple);
+  await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
+  app.createTab({ id: 2, openerTabId: 1 });
+  await new Promise(setImmediate);
+  assert.equal((await app.send({ type: 'apw-get-checkout' }, alipay, 2))?.phase, 'guest-clicked');
+  app.removeTab(1);
+  await new Promise(setImmediate);
+  await app.send({ type: 'apw-checkout-step', phase: 'order-submitted' }, 'https://secure11.www.apple.com.cn/shop/checkout');
+  assert.equal((await app.send({ type: 'apw-get-checkout' }, alipay, 2))?.phase, 'order-submitted');
+  assert.equal((await app.send({ type: 'apw-payment-link', kind: 'cashier', url: alipay }, alipay, 2))?.ok, true);
+});
+
+test('payment tab follows an Apple relay after both source tabs close', async () => {
+  const app = background();
+  const relay = 'https://secure11.www.apple.com.cn/shop/checkout/payment-redirect';
+  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A', taskId }, apple);
+  await app.send({ type: 'apw-checkout-step', phase: 'bag-clicked' }, apple);
+  await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
+  app.navigationTarget({ tabId: 2, sourceTabId: 1, url: relay });
+  await new Promise(setImmediate);
+  app.navigationTarget({ tabId: 3, sourceTabId: 2, url: alipay });
+  await new Promise(setImmediate);
+  app.removeTab(2);
+  app.removeTab(1);
+  await new Promise(setImmediate);
+  await app.send({ type: 'apw-checkout-step', phase: 'order-submitted' }, 'https://secure11.www.apple.com.cn/shop/checkout');
+  assert.equal((await app.send({ type: 'apw-get-checkout' }, alipay, 3))?.phase, 'order-submitted');
+  assert.equal((await app.send({ type: 'apw-payment-link', kind: 'cashier', url: alipay }, alipay, 3))?.ok, true);
+});
+
+test('a closed checkout source cannot authorize payment links after one hour', async () => {
+  const app = background();
+  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A', taskId }, apple);
+  await app.send({ type: 'apw-checkout-step', phase: 'bag-clicked' }, apple);
+  await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
+  await app.send({ type: 'apw-checkout-step', phase: 'order-submitted' }, 'https://secure11.www.apple.com.cn/shop/checkout');
+  app.createTab({ id: 2, openerTabId: 1 });
+  await new Promise(setImmediate);
+  app.removeTab(1);
+  await new Promise(setImmediate);
+  app.advance(60 * 60 * 1000 + 1);
+  assert.equal(await app.send({ type: 'apw-get-checkout' }, alipay, 2), null);
+  assert.equal((await app.send({ type: 'apw-payment-link', kind: 'cashier', url: alipay }, alipay, 2))?.reason, 'no-active-checkout');
 });
 
 async function capture({ flow, nodes, now = 0 }) {
