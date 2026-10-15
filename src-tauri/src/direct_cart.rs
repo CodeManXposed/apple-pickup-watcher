@@ -28,10 +28,12 @@ pub(crate) struct DirectCart {
 }
 
 fn official_url(input: &str, base: &Url, part: &str) -> Result<Url, String> {
-    let url = Url::parse(input).map_err(|_| "Apple 商品 URL 无效".to_owned())?;
+    let mut url = Url::parse(input).map_err(|_| "Apple 商品 URL 无效".to_owned())?;
     if url.scheme() != "https"
         || url.host_str() != base.host_str()
         || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
         || !url
             .path()
             .starts_with(&format!("{}/shop/", base.path().trim_end_matches('/')))
@@ -42,6 +44,10 @@ fn official_url(input: &str, base: &Url, part: &str) -> Result<Url, String> {
     {
         return Err("商品 URL 必须是当前地区 Apple 官网且路径末尾与 SKU 一致".into());
     }
+    // 商品页 URL 可能来自复制的加车结果或旧任务链接。查询参数和片段
+    // 不属于商品身份；保留它们会让预热或会话初始化提前执行加车动作。
+    url.set_query(None);
+    url.set_fragment(None);
     Ok(url)
 }
 
@@ -292,11 +298,29 @@ mod tests {
         );
         assert!(
             official_url(
+                "https://user@www.apple.com.cn/shop/pdpAddToBag/MJYE4CH/A",
+                &base,
+                "MJYE4CH/A"
+            )
+            .is_err()
+        );
+        assert!(
+            official_url(
                 "https://www.apple.com.cn/shop/pdpAddToBag/OTHERCH/A",
                 &base,
                 "MJYE4CH/A"
             )
             .is_err()
+        );
+        assert_eq!(
+            official_url(
+                "https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro/MJYE4CH/A?product=MJYE4CH%2FA&add-to-cart=add-to-cart#apw-auto-add=MJYE4CH%2FA",
+                &base,
+                "MJYE4CH/A"
+            )
+            .unwrap()
+            .as_str(),
+            "https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro/MJYE4CH/A"
         );
     }
 
