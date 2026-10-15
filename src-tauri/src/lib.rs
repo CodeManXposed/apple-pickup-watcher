@@ -60,9 +60,34 @@ fn browser_task_url(
     Ok(task_url)
 }
 
+fn browser_product_add_url(
+    product: &reqwest::Url,
+    target: &Target,
+    task_id: &str,
+    checkout_area: Option<(&str, &str, &str)>,
+) -> Result<reqwest::Url, String> {
+    let marker = reqwest::Url::parse_with_params(
+        "https://localhost/",
+        &[
+            ("apw-auto-add", target.part_number.as_str()),
+            ("apw-store", target.store_number.as_str()),
+        ],
+    )
+    .map_err(|err| err.to_string())?;
+    let mut product = product.clone();
+    product.set_fragment(marker.query());
+    browser_task_url(
+        product.as_str(),
+        task_id,
+        &target.product_name,
+        checkout_area,
+    )
+}
+
 #[cfg(test)]
 mod browser_task_url_tests {
-    use super::browser_task_url;
+    use super::{browser_product_add_url, browser_task_url};
+    use apw_core::model::Target;
 
     #[test]
     fn product_and_area_survive_fragment_parameter_encoding() {
@@ -84,6 +109,31 @@ mod browser_task_url_tests {
             "iPhone 18 Pro 256GB 黑色 & 蓝色 + 50%"
         );
         assert_eq!(pairs.get("apw-district").unwrap(), "浦东新区 & 附近");
+    }
+
+    #[test]
+    fn api_fallback_uses_the_configured_product_page_and_target_sku() {
+        let product =
+            reqwest::Url::parse("https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro/MJYE4CH/A")
+                .unwrap();
+        let target = Target {
+            locale: "zh_CN".into(),
+            store_number: "R683".into(),
+            store_title: "测试门店".into(),
+            part_number: "MJYE4CH/A".into(),
+            product_name: "测试商品".into(),
+            companion_part: None,
+            pickup_location: None,
+        };
+        let task = browser_product_add_url(&product, &target, &"a".repeat(32), None).unwrap();
+        assert_eq!(task.path(), product.path());
+        let fragment =
+            reqwest::Url::parse(&format!("https://localhost/?{}", task.fragment().unwrap()))
+                .unwrap();
+        let pairs: std::collections::HashMap<_, _> = fragment.query_pairs().into_owned().collect();
+        assert_eq!(pairs.get("apw-auto-add").unwrap(), "MJYE4CH/A");
+        assert_eq!(pairs.get("apw-store").unwrap(), "R683");
+        assert_eq!(pairs.get("apw-task").unwrap(), &"a".repeat(32));
     }
 }
 
@@ -652,17 +702,17 @@ async fn open_direct_bag_browser(
     .map_err(|err| format!("浏览器购物袋交接中断：{err}"))?
 }
 
-async fn open_direct_product_browser(
+async fn open_direct_product_task_browser(
     app: &AppHandle,
-    url: String,
+    task_url: String,
     cookies: Vec<browser_bot::SessionCookie>,
 ) -> Result<(), String> {
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        browser_bot::open_direct_product(&app, &url, &cookies, None)
+        browser_bot::open_direct_product_task(&app, &task_url, &cookies)
     })
     .await
-    .map_err(|err| format!("浏览器商品页交接中断：{err}"))?
+    .map_err(|err| format!("浏览器加车任务交接中断：{err}"))?
 }
 
 async fn open_auto_add(
@@ -700,6 +750,7 @@ async fn open_auto_add(
                 (province.as_str(), city.as_str(), district.as_str())
             });
             let mut api_add_confirmed = false;
+            let mut api_browser_fallback = false;
             let mut api_stop_retries = false;
             let result = match add_method {
                 AddMethod::Browser => match browser_task_url(
@@ -753,20 +804,28 @@ async fn open_auto_add(
                             }
                             direct_cart::AddOutcome::Stop { reason, cookies } => {
                                 api_stop_retries = true;
-                                let inspection = if cookies.is_empty() {
-                                    open_task_browser(app, session.product_page().clone()).await
+                                // Stop 只在提交加车请求前产生；将同一商品页交给 Chrome 后，
+                                // 官方按钮可在 Apple 验证完成时继续本次任务。
+                                let task_url = browser_product_add_url(
+                                    session.product_page(), target, &task_id, area,
+                                )?;
+                                let handoff = if cookies.is_empty() {
+                                    open_task_browser(app, task_url).await
                                 } else {
-                                    open_direct_product_browser(
-                                        app,
-                                        session.product_page().to_string(),
-                                        cookies,
-                                    )
-                                    .await
+                                    open_direct_product_task_browser(app, task_url.to_string(), cookies).await
                                 };
-                                return Err(match inspection {
-                                    Ok(()) => format!("{reason}；已在独立浏览器打开商品页供你处理验证或等待放行。本轮不会自动重试加车。"),
-                                    Err(err) => format!("{reason}；无法交接独立浏览器商品页：{err}。本轮不会自动重试加车。"),
-                                });
+                                return match handoff {
+                                    Ok(()) => {
+                                        api_browser_fallback = true;
+                                        let _ = app.emit(NOTICE_CHANNEL, format!(
+                                            "{reason}；已切换到独立浏览器加车。若 Apple 要求验证，请在商品页完成，放行后会继续。"
+                                        ));
+                                        Ok(())
+                                    }
+                                    Err(err) => Err(format!(
+                                        "{reason}；无法交接独立浏览器商品页：{err}。本轮不会自动重试加车。"
+                                    )),
+                                };
                             }
                             direct_cart::AddOutcome::Uncertain { reason, cookies } => {
                                 api_stop_retries = true;
@@ -817,12 +876,12 @@ async fn open_auto_add(
             }
             if result.is_ok() {
                 let watchdog_app = app.clone();
-                let (watchdog_delay, watchdog_message) = match add_method {
-                    AddMethod::Api => (
+                let (watchdog_delay, watchdog_message) = match (add_method, api_browser_fallback) {
+                    (AddMethod::Api, false) => (
                         Duration::from_secs(90),
                         "直连加车已被 Apple 确认，但购物袋在 90 秒内未完成核对；请检查独立浏览器。",
                     ),
-                    AddMethod::Browser => (
+                    _ => (
                         Duration::from_millis(release_task::WAIT_LIMIT_MS),
                         "商品页等待 Apple 放行超过 4 小时，仍未确认加入购物袋；请检查独立浏览器。",
                     ),

@@ -1054,14 +1054,40 @@ fn validate_release_handoff_tab(current: &str, destination: &reqwest::Url) -> Re
     Ok(())
 }
 
+fn handoff_destination(
+    url: &str,
+    bag: bool,
+    navigation_url: Option<&str>,
+) -> Result<(reqwest::Url, String), String> {
+    let parsed = validate_handoff_url(url, bag)?;
+    let navigate_to = match navigation_url {
+        Some(candidate) if !bag => {
+            let mut destination =
+                reqwest::Url::parse(candidate).map_err(|_| "浏览器加车地址无效".to_owned())?;
+            if destination.fragment().is_none() {
+                return Err("浏览器加车地址缺少任务标记".into());
+            }
+            destination.set_fragment(None);
+            if destination != parsed {
+                return Err("浏览器加车地址与商品页不一致".into());
+            }
+            candidate.to_owned()
+        }
+        Some(_) => return Err("购物袋交接不接受商品加车标记".into()),
+        None => url.to_owned(),
+    };
+    Ok((parsed, navigate_to))
+}
+
 fn open_apple_page_with_cookies(
     app: &AppHandle,
     url: &str,
     cookies: &[SessionCookie],
     target_id: Option<&str>,
     bag: bool,
+    navigation_url: Option<&str>,
 ) -> Result<(), String> {
-    let parsed = validate_handoff_url(url, bag)?;
+    let (parsed, navigate_to) = handoff_destination(url, bag, navigation_url)?;
     let _guard = BROWSER_LAUNCH
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -1123,7 +1149,7 @@ fn open_apple_page_with_cookies(
             &mut browser,
             5,
             "Page.navigate",
-            serde_json::json!({"url": url}),
+            serde_json::json!({"url": navigate_to}),
             Some(&session),
         )?;
     } else {
@@ -1131,7 +1157,7 @@ fn open_apple_page_with_cookies(
             &mut browser,
             5,
             "Target.createTarget",
-            serde_json::json!({"url": url}),
+            serde_json::json!({"url": navigate_to}),
         )?;
         if created.get("targetId").and_then(Value::as_str).is_none() {
             return Err("独立浏览器未打开 Apple 商店页面".into());
@@ -1146,7 +1172,7 @@ pub(crate) fn open_direct_bag(
     cookies: &[SessionCookie],
     target_id: Option<&str>,
 ) -> Result<(), String> {
-    open_apple_page_with_cookies(app, url, cookies, target_id, true)
+    open_apple_page_with_cookies(app, url, cookies, target_id, true, None)
 }
 
 pub(crate) fn open_direct_product(
@@ -1155,7 +1181,17 @@ pub(crate) fn open_direct_product(
     cookies: &[SessionCookie],
     target_id: Option<&str>,
 ) -> Result<(), String> {
-    open_apple_page_with_cookies(app, url, cookies, target_id, false)
+    open_apple_page_with_cookies(app, url, cookies, target_id, false, None)
+}
+
+pub(crate) fn open_direct_product_task(
+    app: &AppHandle,
+    task_url: &str,
+    cookies: &[SessionCookie],
+) -> Result<(), String> {
+    let mut product = reqwest::Url::parse(task_url).map_err(|_| "浏览器加车地址无效".to_owned())?;
+    product.set_fragment(None);
+    open_apple_page_with_cookies(app, product.as_str(), cookies, None, false, Some(task_url))
 }
 
 pub(crate) fn apple_cookies(app: &AppHandle, host: &str) -> Result<Vec<SessionCookie>, String> {
@@ -1374,6 +1410,34 @@ mod tests {
         assert!(validate_handoff_url("https://www.apple.com.cn/shop/bag", false).is_err());
         assert!(validate_handoff_url("https://user@www.apple.com.cn/shop/bag", true).is_err());
         assert!(validate_handoff_url("https://example.com/shop/bag", true).is_err());
+    }
+
+    #[test]
+    fn api_fallback_keeps_the_product_page_and_only_adds_a_task_marker() {
+        let product = "https://www.apple.com.cn/shop/pdpAddToBag/MJYE4CH/A";
+        let task = format!("{product}#apw-auto-add=MJYE4CH%2FA&apw-store=R683");
+        assert_eq!(
+            handoff_destination(product, false, Some(&task)).unwrap().1,
+            task
+        );
+        assert!(
+            handoff_destination(product, false, Some("https://evil.example/shop/bag#task"))
+                .is_err()
+        );
+        assert!(
+            handoff_destination(
+                product,
+                false,
+                Some("https://www.apple.com.cn/shop/bag#apw-auto-add=MJYE4CH%2FA")
+            )
+            .is_err()
+        );
+        assert!(handoff_destination(
+            product,
+            false,
+            Some("https://www.apple.com.cn/shop/pdpAddToBag/MJYE4CH/A?add-to-cart=add-to-cart#task")
+        )
+        .is_err());
     }
 
     #[test]
