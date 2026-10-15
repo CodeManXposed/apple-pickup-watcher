@@ -167,6 +167,21 @@ test('cart error reporting requires the matching Apple add URL and task identity
   });
 });
 
+test('a waiting or unconfirmed cart times out only for the active desktop task', async () => {
+  const product = 'https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro/MJYE4CH/A';
+  const message = { type: 'apw-cart-timeout', partNumber: 'MJYE4CH/A', storeNumber: 'R683', taskId };
+  const active = background();
+  assert.equal(await active.send(message, 'https://evil.example/shop/product'), null);
+  assert.equal((await active.send({ ...message, taskId: 'invalid' }, product))?.reason, 'invalid-cart-timeout');
+  assert.equal((await active.send(message, product))?.ok, true);
+  assert.deepEqual(active.requests.map(({ url }) => new URL(url).pathname), ['/task-check', '/task-status']);
+  assert.equal(JSON.parse(active.requests[1].options.body).stage, 'failed');
+
+  const stopped = background({ taskActive: false });
+  assert.equal((await stopped.send(message, product))?.reason, 'inactive-task');
+  assert.equal(stopped.requests.filter(({ url }) => url.endsWith('/task-status')).length, 0);
+});
+
 test('order confirmations stay bound to the monitored store and checkout tab', async () => {
   const app = background();
   const checkout = 'https://secure11.www.apple.com.cn/shop/checkout';

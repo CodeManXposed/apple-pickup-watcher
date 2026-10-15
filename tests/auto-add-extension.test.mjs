@@ -55,7 +55,9 @@ function page({ hash = `#apw-auto-add=MJYE4CH%2FA&apw-store=R683&apw-task=${task
   window.top = window;
   let interval;
   let taskChecks = 0;
+  const failures = [];
   const chrome = { runtime: { async sendMessage(message) {
+    if (message.type === 'apw-cart-timeout') { failures.push(message); return { ok: true }; }
     if (message.type !== 'apw-cart-active') return null;
     taskChecks++;
     return typeof taskActive === 'function' ? taskActive() : taskActive;
@@ -65,7 +67,8 @@ function page({ hash = `#apw-auto-add=MJYE4CH%2FA&apw-store=R683&apw-task=${task
     setInterval(fn) { interval = fn; return 1; }, clearInterval() { interval = null; },
   });
   return { location, history, storage, nodes, add, trade, care, capacity,
-    tick() { interval?.(); }, settle: () => new Promise(setImmediate), taskChecks: () => taskChecks };
+    tick() { interval?.(); }, settle: () => new Promise(setImmediate), taskChecks: () => taskChecks,
+    failures };
 }
 
 test('matching iPhone SKU chooses required options, clicks official add once, then verifies attach URL', async () => {
@@ -144,10 +147,43 @@ test('stopped desktop task never clicks add, but a task becoming active can cont
   assert.equal(p.taskChecks(), 2);
 });
 
+test('a restock task keeps its intent while Apple verification lasts beyond one minute', async () => {
+  const p = page({
+    hash: '',
+    initialIntent: {
+      part: 'MJYE4CH/A', storeNumber: 'R683', taskId,
+      phase: 'choosing', startedAt: Date.now() - 120_000,
+    },
+    add: control({ disabled: true }),
+    capacity: control({ shown: false }),
+  });
+  assert.equal(p.storage.has('apwAutoAddIntent'), true);
+  p.add.disabled = false;
+  p.tick();
+  await p.settle();
+  assert.equal(p.add.clicks, 1);
+});
+
+test('an unconfirmed add reports failure to the desktop promptly after waiting', async () => {
+  const p = page({
+    hash: '',
+    initialIntent: {
+      part: 'MJYE4CH/A', storeNumber: 'R683', taskId,
+      phase: 'submitting', startedAt: Date.now() - 120_000,
+      submittedAt: Date.now() - 31_000,
+    },
+  });
+  await p.settle();
+  assert.equal(p.storage.has('apwAutoAddIntent'), false);
+  assert.equal(p.failures.length, 1);
+  assert.equal(p.failures[0].type, 'apw-cart-timeout');
+  assert.equal(p.failures[0].taskId, taskId);
+});
+
 test('Apple add error page stops the cart flow and reports the active task', async () => {
   const intent = {
     part: 'MJYE4CH/A', storeNumber: 'R683', taskId,
-    phase: 'submitting', startedAt: Date.now(), submittedAt: Date.now(),
+    phase: 'submitting', startedAt: Date.now() - 120_000, submittedAt: Date.now(),
   };
   const p = page({
     hash: '', search: '?product=MJYE4CH%2FA&add-to-cart=add-to-cart',

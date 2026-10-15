@@ -155,6 +155,23 @@ async function forwardCartFailure(message, sender) {
       !/^[a-f0-9]{32}$/.test(message.taskId || '')) {
     return { ok: false, reason: 'invalid-cart-failure' };
   }
+  return postCartFailure(message);
+}
+
+async function forwardCartTimeout(message, sender) {
+  const page = new URL(sender.url);
+  if (!applePage(sender.url) || !page.pathname.includes('/shop/') ||
+      !Number.isInteger(sender.tab?.id) ||
+      !/^[A-Z0-9]{4,20}\/[A-Z]$/.test(message.partNumber || '') ||
+      !/^[A-Z0-9]{2,10}$/.test(message.storeNumber || '') ||
+      !/^[a-f0-9]{32}$/.test(message.taskId || '')) {
+    return { ok: false, reason: 'invalid-cart-timeout' };
+  }
+  if (!await activeTask(sender, message)) return { ok: false, reason: 'inactive-task' };
+  return postCartFailure(message);
+}
+
+async function postCartFailure(message) {
   const { apwBridgeToken } = await chrome.storage.local.get('apwBridgeToken');
   if (!/^[a-f0-9]{32}$/i.test(apwBridgeToken || '')) {
     return { ok: false, reason: 'missing-pairing-code' };
@@ -200,6 +217,9 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     }
     if (message?.type === 'apw-cart-failed') {
       return forwardCartFailure(message, sender);
+    }
+    if (message?.type === 'apw-cart-timeout') {
+      return forwardCartTimeout(message, sender);
     }
     if (message?.type === 'apw-cart-active' && applePage(sender.url)) {
       const path = new URL(sender.url).pathname;

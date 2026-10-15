@@ -761,16 +761,18 @@ async fn open_auto_add(
             }
             if result.is_ok() {
                 let watchdog_app = app.clone();
-                let watchdog_message = match add_method {
-                    AddMethod::Api => {
-                        "直连加车已被 Apple 确认，但购物袋在 90 秒内未完成核对；请检查独立浏览器。"
-                    }
-                    AddMethod::Browser => {
-                        "商品页在 90 秒内未确认加入购物袋；请检查浏览器页面或 Apple 的访问限制。"
-                    }
+                let (watchdog_delay, watchdog_message) = match add_method {
+                    AddMethod::Api => (
+                        Duration::from_secs(90),
+                        "直连加车已被 Apple 确认，但购物袋在 90 秒内未完成核对；请检查独立浏览器。",
+                    ),
+                    AddMethod::Browser => (
+                        Duration::from_millis(release_task::WAIT_LIMIT_MS),
+                        "商品页等待 Apple 放行超过 4 小时，仍未确认加入购物袋；请检查独立浏览器。",
+                    ),
                 };
                 tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(90)).await;
+                    tokio::time::sleep(watchdog_delay).await;
                     let bridge = watchdog_app.state::<PaymentBridge>();
                     match bridge.fail_if_stage(&task_id, "launched") {
                         Ok(Some(status)) => {

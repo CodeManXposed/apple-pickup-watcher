@@ -9,7 +9,7 @@
       !/^[A-Z0-9]{4,20}\/[A-Z]$/.test(intent.part) ||
       !/^[A-Z0-9]{2,10}$/.test(intent.storeNumber) ||
       !/^[a-f0-9]{32}$/.test(intent.taskId || '') ||
-      Date.now() - intent.startedAt > 90000 ||
+      Date.now() - (intent.submittedAt || intent.startedAt) > 90000 ||
       query.get('product')?.toUpperCase() !== intent.part) return;
   sessionStorage.removeItem('apwAutoAddIntent');
   void chrome.runtime.sendMessage({

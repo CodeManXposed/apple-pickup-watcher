@@ -6,6 +6,8 @@
   const PART = /^[A-Z0-9]{4,20}\/[A-Z]$/;
   const STORE = /^[A-Z0-9]{2,10}$/;
   const TASK = /^[a-f0-9]{32}$/;
+  const WAIT_LIMIT_MS = 4 * 60 * 60 * 1000;
+  const SUBMIT_LIMIT_MS = 90 * 1000;
   const params = new URLSearchParams(location.hash.slice(1));
   let intent;
 
@@ -25,8 +27,15 @@
   } else {
     try { intent = JSON.parse(sessionStorage.getItem(KEY) || 'null'); } catch { /* 忽略无效数据 */ }
   }
-  if (!intent || !PART.test(intent.part) || !STORE.test(intent.storeNumber) || !TASK.test(intent.taskId || '') ||
-      Date.now() - intent.startedAt > 60000) {
+  const expired = () => {
+    if (!Number.isFinite(intent?.startedAt) || intent.startedAt > Date.now()) return true;
+    if (intent.phase === 'submitting' || intent.phase === 'failed') {
+      return !Number.isFinite(intent.submittedAt) || intent.submittedAt > Date.now() ||
+        Date.now() - intent.submittedAt > SUBMIT_LIMIT_MS;
+    }
+    return Date.now() - intent.startedAt > WAIT_LIMIT_MS;
+  };
+  if (!intent || !PART.test(intent.part) || !STORE.test(intent.storeNumber) || !TASK.test(intent.taskId || '') || expired()) {
     sessionStorage.removeItem(KEY);
     return;
   }
@@ -53,6 +62,10 @@
     clearInterval(timer);
     sessionStorage.removeItem(KEY);
     notice(message, true);
+    void chrome.runtime.sendMessage({
+      type: 'apw-cart-timeout', partNumber: intent.part,
+      storeNumber: intent.storeNumber, taskId: intent.taskId,
+    }).catch(() => {});
   }
 
   function finish() {
@@ -80,7 +93,7 @@
   let checkingTask = false;
 
   function tick() {
-    if (Date.now() - intent.startedAt > 60000) {
+    if (expired()) {
       stop('自动加车超时。请在 Apple 页面核对后手动操作。');
       return;
     }

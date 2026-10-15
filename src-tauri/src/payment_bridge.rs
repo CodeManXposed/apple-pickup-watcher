@@ -822,7 +822,7 @@ async fn handle_connection<R: Runtime>(app: AppHandle<R>, mut socket: TcpStream)
         if incoming.stage == "failed" {
             let _ = app.emit(
                 NOTICE_CHANNEL,
-                "Apple 返回加车错误页面，购物袋状态未确认。请在独立浏览器检查购物袋；本轮已停止，避免重复加车。",
+                "Apple 未确认商品已加入购物袋。请在独立浏览器检查购物袋；本轮已停止，避免重复加车。",
             );
         }
         return;
