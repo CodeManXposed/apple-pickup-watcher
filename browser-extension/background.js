@@ -236,11 +236,12 @@ chrome.tabs.onCreated.addListener((tab) => {
   }).catch(() => {});
 });
 
-// Apple 可能用 noopener 打开支付宝，此时新标签没有 openerTabId。
-// 导航事件仍带来源标签页，只接纳从本次结账产生的支付宝导航。
+// Apple 可能用 noopener 打开新标签，此时没有 openerTabId；付款前也可能
+// 先经过 Apple 商店中转页。导航事件仍带来源标签页，只关联本次结账发起的导航。
 chrome.webNavigation.onCreatedNavigationTarget.addListener((details) => {
   if (!Number.isInteger(details.tabId) || !Number.isInteger(details.sourceTabId) ||
-      !alipayPage(details.url)) return;
+      !(alipayPage(details.url) || applePage(details.url) &&
+        new URL(details.url).pathname.startsWith('/shop/'))) return;
   flowFor(details.sourceTabId).then(async (flow) => {
     if (!flow || !['guest-clicked', 'order-submitted'].includes(flow.phase)) return;
     await chrome.storage.session.set({

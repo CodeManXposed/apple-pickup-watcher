@@ -46,6 +46,8 @@ PAGES = {
  onclick="location.href='/shop/signIn'">结账</button></div>''',
     "/shop/signIn": '''<!doctype html><meta charset="utf-8"><title>访客结账</title>
 <button onclick="location.href='/shop/checkout'">以游客身份继续</button>''',
+    "/shop/payment-relay": '''<!doctype html><meta charset="utf-8"><title>付款中转</title>
+<script>location.replace('/alipay')</script>''',
     "/shop/checkout": '''<!doctype html><meta charset="utf-8"><title>结账</title>
 <section id="fulfillment"><h2>到店取货</h2><label><input type="radio"
  class="form-selector-input" name="pickupStore" value="R683" checked>上海环球港</label>
@@ -400,6 +402,7 @@ async def main():
         checkout = PAGES["/shop/checkout"]
         for navigation_mode, payment_mode in (
             ("same tab", "qr"), ("new tab", "qr"), ("noopener tab", "qr"),
+            ("noopener Apple relay", "qr"),
             ("same tab", "cashier"), ("new tab", "cashier"), ("noopener tab", "cashier"),
             ("same tab", "late-qr"),
             ("same tab", "iframe-retry"),
@@ -426,6 +429,7 @@ async def main():
                     "same tab": "location.href='/alipay'",
                     "new tab": "window.open('/alipay', '_blank')",
                     "noopener tab": "window.open('/alipay', '_blank', 'noopener')",
+                    "noopener Apple relay": "window.open('/shop/payment-relay', '_blank', 'noopener')",
                     "noopener delayed tab": "window.open('/alipay', '_blank', 'noopener')",
                 }[navigation_mode],
             )

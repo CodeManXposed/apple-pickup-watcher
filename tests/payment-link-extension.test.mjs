@@ -180,6 +180,21 @@ test('Alipay navigation without an opener follows only its active Apple checkout
   assert.equal((await app.send({ type: 'apw-payment-link', kind: 'cashier', url: alipay }, alipay, 2))?.ok, true);
 });
 
+test('a noopener Apple relay keeps the checkout identity until Alipay opens', async () => {
+  const app = background();
+  const relay = 'https://secure11.www.apple.com.cn/shop/checkout/payment-redirect';
+  await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A', taskId }, apple);
+  await app.send({ type: 'apw-checkout-step', phase: 'bag-clicked' }, apple);
+  await app.send({ type: 'apw-checkout-step', phase: 'guest-clicked' }, 'https://secure11.www.apple.com.cn/shop/signIn');
+  await app.send({ type: 'apw-checkout-step', phase: 'order-submitted' }, 'https://secure11.www.apple.com.cn/shop/checkout');
+  app.navigationTarget({ tabId: 2, sourceTabId: 1, url: relay });
+  app.navigationTarget({ tabId: 3, sourceTabId: 1, url: 'https://evil.example/shop/checkout/payment-redirect' });
+  await new Promise(setImmediate);
+  assert.equal((await app.send({ type: 'apw-get-checkout' }, alipay, 2))?.phase, 'order-submitted');
+  assert.equal(await app.send({ type: 'apw-get-checkout' }, alipay, 3), null);
+  assert.equal((await app.send({ type: 'apw-payment-link', kind: 'cashier', url: alipay }, alipay, 2))?.ok, true);
+});
+
 async function capture({ flow, nodes, now = 0 }) {
   const sent = [];
   const clock = { now: () => now };
