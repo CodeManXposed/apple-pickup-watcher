@@ -1,0 +1,581 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import vm from 'node:vm';
+import test from 'node:test';
+
+const script = readFileSync(resolve('browser-extension/checkout-flow.js'), 'utf8');
+const taskId = 'b'.repeat(32);
+
+function button(label, group = null) {
+  return {
+    textContent: label, disabled: false, clicks: 0, style: {},
+    getAttribute(key) { return key === 'aria-label' ? null : null; },
+    getClientRects() { return this.hidden ? [] : [1]; },
+    closest(selector) { return selector === '.rs-bag-checkout-mainbutton' ? group : null; },
+    click() { this.clicks++; },
+  };
+}
+
+async function page({ pathname, hash = '', official = [], candidates = [], phase = null, selectors = {}, profileReady = false, flowProps = {}, orderConfig = null, hostname = 'secure11.www.apple.com.cn', activeTask = true, failOnce = [] }) {
+  const location = { pathname, search: '', hash, hostname, origin: 'https://www.apple.com.cn' };
+  const history = { state: null, replaceState(_state, _title, url) { this.url = url; } };
+  const notices = new Map();
+  const attributes = new Map();
+  let currentPhase = phase;
+  let currentFlow = { storeNumber: 'R683', taskId, ...flowProps };
+  let clickHandler;
+  let interval;
+  const sent = [];
+  const failures = new Set(failOnce);
+  const chrome = {
+    runtime: {
+      async sendMessage(message) {
+        sent.push(message);
+        if (failures.delete(message.type)) return null;
+        if (message.type === 'apw-task-stage') return { ok: true };
+        if (message.type === 'apw-active-task') return typeof activeTask === 'function' ? activeTask() : activeTask;
+        if (message.type === 'apw-begin-checkout') {
+          if (!(typeof activeTask === 'function' ? activeTask() : activeTask)) return null;
+          currentPhase = 'bag';
+        }
+        if (message.type === 'apw-checkout-step') currentPhase = message.phase;
+        if (message.type === 'apw-confirm-store') currentFlow.pickupConfirmed = true;
+        if (message.type === 'apw-confirm-alipay') currentFlow.alipayConfirmed = true;
+        return currentPhase ? { phase: currentPhase, ...currentFlow } : null;
+      },
+    },
+    storage: { local: { async get() { return { apwOrderConfig: orderConfig }; } } },
+  };
+  const document = {
+    documentElement: {
+      getAttribute(key) { return attributes.get(key) ?? null; },
+      setAttribute(key, value) { attributes.set(key, value); },
+    },
+    body: { appendChild(node) { notices.set(node.id, node); } },
+    getElementById(id) { return notices.get(id) || null; },
+    createElement() { return { style: {}, setAttribute() {}, textContent: '' }; },
+    querySelectorAll(selector) {
+      if (selector in selectors) return selectors[selector];
+      return selector === '[data-autom="checkout"]' ? official : candidates;
+    },
+    querySelector(selector) { return selectors[selector]?.[0] || null; },
+    addEventListener(type, listener) { if (type === 'click') clickHandler = listener; },
+  };
+  const window = {};
+  window.top = window;
+  window.dispatchEvent = (event) => {
+    if (profileReady && event.type === 'apw-request-profile-fill') {
+      attributes.set('data-apw-profile-fill-ready', '1');
+    }
+  };
+  vm.runInNewContext(script, {
+    window, location, history, document, chrome, URLSearchParams, URL, Date,
+    Event: class { constructor(type) { this.type = type; } },
+    MutationObserver: class { observe() {} },
+    setTimeout() { return 1; },
+    setInterval(callback) { interval = callback; return 1; },
+  });
+  await new Promise(setImmediate);
+  return { history, notices, sent, tick: () => interval?.(), click(target) { clickHandler?.({ target }); }, get phase() { return currentPhase; } };
+}
+
+test('marked bag clicks the official checkout button once', async () => {
+  const checkout = button('结账', {});
+  const applePay = button('Check out with Apple Pay');
+  const item = { href: 'https://www.apple.com.cn/shop/product/mjye4ch/a', textContent: 'iPhone 18 Pro 256GB 黑色',
+    closest() { return { querySelector() { return { value: '1' }; } }; } };
+  const result = await page({
+    pathname: '/shop/bag', hash: `#apw-checkout=1&apw-store=R683&apw-part=MJYE4CH%2FA&apw-task=${taskId}`,
+    official: [checkout], candidates: [applePay],
+    selectors: { '[data-autom="bag-item-name"]': [item] },
+  });
+  assert.equal(checkout.clicks, 1);
+  assert.equal(applePay.clicks, 0);
+  assert.equal(result.phase, 'bag-clicked');
+  assert.equal(result.sent.find((message) => message.type === 'apw-begin-checkout')?.taskId, taskId);
+  assert.equal(result.history.url, '/shop/bag');
+});
+
+test('bag retries task confirmation when it loads before the desktop marks the task launched', async () => {
+  const checkout = button('结账', {});
+  const item = { href: 'https://www.apple.com.cn/shop/product/mjye4ch/a', textContent: 'iPhone 18 Pro 256GB 黑色',
+    closest() { return { querySelector() { return { value: '1' }; } }; } };
+  let checks = 0;
+  const result = await page({
+    pathname: '/shop/bag', hash: `#apw-checkout=1&apw-store=R683&apw-part=MJYE4CH%2FA&apw-task=${taskId}`,
+    official: [checkout], selectors: { '[data-autom="bag-item-name"]': [item] },
+    activeTask: () => ++checks > 1,
+  });
+  assert.equal(checkout.clicks, 0);
+  assert.equal(result.phase, null);
+  await result.tick();
+  assert.equal(checkout.clicks, 1);
+  assert.equal(result.phase, 'bag-clicked');
+  assert.equal(checks, 3);
+});
+
+test('bag binds pickup area to the checkout task', async () => {
+  const checkout = button('结账', {});
+  const item = { href: 'https://www.apple.com.cn/shop/product/mjye4ch/a', textContent: 'iPhone 18 Pro 256GB 黑色',
+    closest() { return { querySelector() { return { value: '1' }; } }; } };
+  const params = new URLSearchParams({
+    'apw-checkout': '1', 'apw-store': 'R683', 'apw-part': 'MJYE4CH/A',
+    'apw-task': taskId, 'apw-product': 'SKU MJYE4CH/A',
+    'apw-province': '上海', 'apw-city': '上海', 'apw-district': '普陀区',
+  });
+  const result = await page({
+    pathname: '/shop/bag', hash: `#${params}`, official: [checkout],
+    selectors: { '[data-autom="bag-item-name"]': [item] },
+  });
+  const started = result.sent.find((message) => message.type === 'apw-begin-checkout');
+  assert.equal(started.area.province, '上海');
+  assert.equal(started.area.district, '普陀区');
+  assert.equal(started.productName, 'iPhone 18 Pro 256GB 黑色');
+});
+
+test('bag without the exact target SKU does not enter checkout', async () => {
+  const checkout = button('结账', {});
+  const result = await page({
+    pathname: '/shop/bag', hash: '#apw-checkout=1&apw-store=R683&apw-part=MJYE4CH%2FA',
+    official: [checkout], selectors: { '[data-autom="bag-item-name"]': [
+      { href: 'https://www.apple.com.cn/shop/product/otherch/a' },
+    ] },
+  });
+  assert.equal(checkout.clicks, 0);
+  assert.equal(result.phase, null);
+});
+
+test('bag waits for an Apple product name before starting checkout', async () => {
+  const checkout = button('结账', {});
+  const item = { href: 'https://www.apple.com.cn/shop/product/mjye4ch/a', textContent: ' ',
+    closest() { return { querySelector() { return { value: '1' }; } }; } };
+  const result = await page({
+    pathname: '/shop/bag', hash: `#apw-checkout=1&apw-store=R683&apw-part=MJYE4CH%2FA&apw-task=${taskId}`,
+    official: [checkout], selectors: { '[data-autom="bag-item-name"]': [item] },
+  });
+  assert.equal(checkout.clicks, 0);
+  assert.equal(result.sent.some((message) => message.type === 'apw-begin-checkout'), false);
+});
+
+test('bag with extra items or target quantity two does not enter checkout', async () => {
+  const checkout = button('结账', {});
+  const target = { href: 'https://www.apple.com.cn/shop/product/mjye4ch/a',
+    closest() { return { querySelector() { return { value: '2' }; } }; } };
+  const base = {
+    pathname: '/shop/bag', hash: '#apw-checkout=1&apw-store=R683&apw-part=MJYE4CH%2FA',
+    official: [checkout],
+  };
+  const quantity = await page({ ...base, selectors: { '[data-autom="bag-item-name"]': [target] } });
+  assert.equal(quantity.phase, null);
+  const extra = await page({ ...base, selectors: { '[data-autom="bag-item-name"]': [target,
+    { href: 'https://www.apple.com.cn/shop/product/mw493fe/a' }] } });
+  assert.equal(extra.phase, null);
+  assert.equal(checkout.clicks, 0);
+});
+
+test('unmarked bag cannot start checkout and guest step does not place an order', async () => {
+  const checkout = button('结账', {});
+  await page({ pathname: '/shop/bag', official: [checkout] });
+  assert.equal(checkout.clicks, 0);
+
+  const guest = button('以游客身份继续');
+  const placeOrder = button('现在下订单');
+  const result = await page({
+    pathname: '/shop/checkout', phase: 'bag-clicked', candidates: [placeOrder, guest],
+  });
+  assert.equal(guest.clicks, 1);
+  assert.equal(placeOrder.clicks, 0);
+  assert.equal(result.phase, 'guest-clicked');
+});
+
+test('auto order never treats another Apple locale as CNY', async () => {
+  const order = button('Place your order');
+  const result = await page({
+    pathname: '/shop/checkout', hostname: 'secure11.www.apple.com', phase: 'guest-clicked',
+    flowProps: { pickupConfirmed: true, alipayConfirmed: true },
+    orderConfig: { enabled: true, maxCny: 9999 },
+    selectors: {
+      '[data-autom="continue-button-placeOrder"]': [order],
+      'span, strong, b, dt, th, p, div': [totalLabel('9,999.00')],
+      '[role="dialog"]': [],
+    },
+  });
+  assert.equal(order.clicks, 0);
+  assert.equal(result.phase, 'guest-clicked');
+});
+
+test('pickup fulfillment selects only the monitored store before continuing', async () => {
+  const target = button('上海环球港');
+  target.value = 'R683';
+  target.checked = false;
+  const fulfillment = button('继续');
+  const timeslot = button('');
+  timeslot.value = '12:30';
+  timeslot.parentElement = { textContent: '可选时段' };
+  timeslot.options = [{ value: '12:30', textContent: '12:30 – 12:45', selected: true }];
+  const other = button('其他门店');
+  other.value = 'R999';
+  const selectors = {
+    'input[type="radio"].form-selector-input': [other, target],
+    select: [timeslot],
+    '[data-autom="fulfillment-continue-button"]': [fulfillment],
+    '[role="dialog"]': [],
+  };
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
+  assert.equal(target.clicks, 1);
+  assert.equal(other.clicks, 0);
+  assert.equal(fulfillment.clicks, 0);
+
+  target.checked = true;
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
+  assert.equal(fulfillment.clicks, 1);
+});
+
+test('checkout retries a temporary store confirmation failure without a DOM change', async () => {
+  const store = button('上海环球港');
+  store.value = 'R683';
+  store.checked = true;
+  const fulfillment = button('继续');
+  const timeslot = button('');
+  timeslot.value = '12:30';
+  timeslot.parentElement = { textContent: '可选时段' };
+  timeslot.options = [{ value: '12:30', textContent: '12:30 – 12:45', selected: true }];
+  const result = await page({
+    pathname: '/shop/checkout', phase: 'guest-clicked', failOnce: ['apw-confirm-store'],
+    selectors: {
+      'input[type="radio"].form-selector-input': [store],
+      select: [timeslot],
+      '[data-autom="fulfillment-continue-button"]': [fulfillment],
+      '[role="dialog"]': [],
+    },
+  });
+  assert.equal(fulfillment.clicks, 0);
+  await result.tick();
+  assert.equal(fulfillment.clicks, 1);
+  assert.equal(result.sent.filter((message) => message.type === 'apw-confirm-store').length, 2);
+});
+
+test('a failed stage report is retried while the checkout page is idle', async () => {
+  const pickupContinue = button('继续');
+  const result = await page({
+    pathname: '/shop/checkout', phase: 'guest-clicked', failOnce: ['apw-task-stage'],
+    selectors: { '.rs-pickup-button button': [pickupContinue], '[role="dialog"]': [] },
+  });
+  assert.equal(result.sent.filter((message) => message.type === 'apw-task-stage' && message.stage === 'profile').length, 1);
+  await result.tick();
+  await new Promise(setImmediate);
+  assert.equal(result.sent.filter((message) => message.type === 'apw-task-stage' && message.stage === 'profile').length, 2);
+});
+
+test('pickup selects pickup mode before looking for a store', async () => {
+  const mode = button('');
+  mode.labels = [{ textContent: '我要取货' }];
+  mode.checked = false;
+  const fulfillment = button('继续');
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked',
+    selectors: {
+      'input[type="radio"]': [mode],
+      'input[type="radio"].form-selector-input': [],
+      '[data-autom="fulfillment-continue-button"]': [fulfillment],
+      '[role="dialog"]': [],
+    },
+  });
+  assert.equal(mode.clicks, 1);
+  assert.equal(fulfillment.clicks, 0);
+});
+
+test('pickup opens area selector when the monitored store is not listed', async () => {
+  const trigger = button('选择地区');
+  const fulfillment = button('继续');
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', candidates: [trigger],
+    flowProps: { area: { province: '上海', city: '上海', district: '普陀区' } },
+    selectors: {
+      'input[type="radio"].form-selector-input': [],
+      '[data-autom="fulfillment-continue-button"]': [fulfillment],
+      '[role="dialog"]': [],
+    },
+  });
+  assert.equal(trigger.clicks, 1);
+  assert.equal(fulfillment.clicks, 0);
+});
+
+test('pickup waits for a check-in slot before continuing', async () => {
+  const target = button('上海环球港');
+  target.value = 'R683';
+  target.checked = true;
+  const fulfillment = button('继续');
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked',
+    selectors: {
+      'input[type="radio"].form-selector-input': [target],
+      select: [],
+      '[data-autom="fulfillment-continue-button"]': [fulfillment],
+      '[role="dialog"]': [],
+    },
+  });
+  assert.equal(fulfillment.clicks, 0);
+});
+
+test('pickup selects the earliest offered date and check-in slot', async () => {
+  const store = button('上海环球港');
+  store.value = 'R683';
+  store.checked = true;
+  const date = button('');
+  date.labels = [{ textContent: 'October 15' }];
+  date.checked = false;
+  const fulfillment = button('继续');
+  const timeslot = button('');
+  timeslot.value = '';
+  timeslot.parentElement = { textContent: '可选时段' };
+  timeslot.options = [
+    { value: '', textContent: '请选择', selected: true },
+    { value: '12:30', textContent: '12:30 – 12:45', selected: false },
+  ];
+  timeslot.dispatchEvent = () => {};
+  const selectors = {
+    'input[type="radio"].form-selector-input': [store],
+    'input[type="radio"]': [date],
+    select: [timeslot],
+    '[data-autom="fulfillment-continue-button"]': [fulfillment],
+    '[role="dialog"]': [],
+  };
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
+  assert.equal(date.clicks, 1);
+  assert.equal(fulfillment.clicks, 0);
+  date.checked = true;
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
+  assert.equal(timeslot.value, '12:30');
+  assert.equal(fulfillment.clicks, 0);
+});
+
+test('contact step waits for profile fill and required fields before continuing', async () => {
+  const continueButton = button('继续');
+  const required = button('');
+  required.name = 'pickupEmail';
+  required.value = '';
+  required.type = 'email';
+  const selectors = {
+    '.rs-pickup-button button': [continueButton],
+    'input[required], textarea[required], select[required], input[aria-required="true"], textarea[aria-required="true"], select[aria-required="true"]': [required],
+    'input, textarea, select': [required],
+    '[role="dialog"]': [],
+  };
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
+  assert.equal(continueButton.clicks, 0);
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors, profileReady: true });
+  assert.equal(continueButton.clicks, 0);
+  required.value = 'pickup@example.test';
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors, profileReady: true });
+  assert.equal(continueButton.clicks, 1);
+});
+
+test('pickup contact waits for Apple phone verification', async () => {
+  const continueButton = button('继续');
+  const verify = button('验证');
+  const result = await page({ pathname: '/shop/checkout', phase: 'guest-clicked', profileReady: true,
+    candidates: [verify],
+    selectors: {
+      '[data-autom="fulfillment-continue-button"]': [],
+      '.rs-pickup-button button': [continueButton],
+      '[role="dialog"]': [],
+      'input[required], textarea[required], select[required], input[aria-required="true"], textarea[aria-required="true"], select[aria-required="true"]': [],
+      'input, textarea, select': [],
+    },
+  });
+  assert.equal(continueButton.clicks, 0);
+  assert.ok(result.sent.some((message) => message.type === 'apw-task-stage' && message.stage === 'profileAction'));
+});
+
+test('hidden buttons from earlier checkout steps do not block the visible contact step', async () => {
+  const oldFulfillment = button('继续');
+  oldFulfillment.hidden = true;
+  const pickupContinue = button('继续');
+  const email = button('');
+  email.name = 'pickupEmail';
+  email.value = 'pickup@example.test';
+  email.type = 'email';
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', profileReady: true,
+    selectors: {
+      '[data-autom="fulfillment-continue-button"]': [oldFulfillment],
+      '.rs-pickup-button button': [pickupContinue],
+      'input[required], textarea[required], select[required], input[aria-required="true"], textarea[aria-required="true"], select[aria-required="true"]': [email],
+      'input, textarea, select': [email],
+      '[role="dialog"]': [],
+    },
+  });
+  assert.equal(oldFulfillment.clicks, 0);
+  assert.equal(pickupContinue.clicks, 1);
+});
+
+test('privacy consent and a missing monitored store stop automatic checkout', async () => {
+  const fulfillment = button('继续');
+  const privacy = button('Apple 和你的数据隐私');
+  const selectors = {
+    '[data-autom="fulfillment-continue-button"]': [fulfillment],
+    'input[type="radio"].form-selector-input': [],
+    '[role="dialog"]': [privacy],
+  };
+  const consent = await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
+  assert.equal(fulfillment.clicks, 0);
+  assert.ok(consent.sent.some((message) => message.type === 'apw-task-stage' && message.stage === 'privacy'));
+
+  selectors['[role="dialog"]'] = [];
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
+  assert.equal(fulfillment.clicks, 0);
+});
+
+test('billing selects Alipay and leaves the final Apple order button to the user', async () => {
+  const alipay = button('支付宝');
+  alipay.id = 'checkout-billing-alipay';
+  alipay.name = 'billing';
+  alipay.value = 'ALIPAY';
+  alipay.checked = false;
+  const other = button('信用卡');
+  other.id = 'checkout-billing-card';
+  other.name = 'billing';
+  other.value = 'CARD';
+  const review = button('继续');
+  const order = button('现在下订单');
+  const selectors = {
+    'input[type="radio"]': [other, alipay],
+    '[data-autom="continue-button-review"]': [review],
+    '[data-autom="continue-button-placeOrder"]': [order],
+    '[role="dialog"]': [],
+  };
+  await page({ pathname: '/shop/checkout', phase: 'guest-clicked', selectors });
+  assert.equal(alipay.clicks, 1);
+  assert.equal(review.clicks, 0);
+  assert.equal(order.clicks, 0);
+});
+
+test('records final order only after the Apple order button is clicked', async () => {
+  const order = button('现在下订单');
+  const result = await page({
+    pathname: '/shop/checkout', phase: 'guest-clicked',
+    selectors: { '[data-autom="continue-button-placeOrder"]': [order], '[role="dialog"]': [] },
+  });
+  assert.equal(result.phase, 'guest-clicked');
+  assert.equal(order.clicks, 0);
+  result.click({ closest(selector) { return selector === '[data-autom="continue-button-placeOrder"]' ? order : null; } });
+  await new Promise(setImmediate);
+  assert.equal(result.phase, 'order-submitted');
+});
+
+function totalLabel(amount) {
+  return {
+    children: [], textContent: '订单总计', parentElement: { textContent: `订单总计 ¥${amount}` },
+    closest() { return null; }, getClientRects() { return [1]; },
+  };
+}
+
+function reviewProduct(name = 'iPhone 18 Pro 256GB 黑色', quantity = 1, extraItem = false) {
+  const item = { textContent: `${name} 数量：${quantity} RMB 9,999` };
+  item.parentElement = { children: extraItem ? [item, {}] : [item] };
+  return {
+    textContent: name,
+    getClientRects() { return [1]; },
+    closest(selector) { return selector === 'li' ? item : null; },
+  };
+}
+
+test('auto order clicks only when the confirmed Apple total is within the configured cap', async () => {
+  const order = button('现在下订单');
+  const result = await page({
+    pathname: '/shop/checkout', phase: 'guest-clicked',
+    flowProps: { pickupConfirmed: true, alipayConfirmed: true, productName: 'iPhone 18 Pro 256GB 黑色' },
+    orderConfig: { enabled: true, maxCny: 9999 },
+    selectors: {
+      '[data-autom="continue-button-placeOrder"]': [order],
+      'span, strong, b, dt, th, p, div': [totalLabel('9,999.00')],
+      'h1, h2, h3, h4, h5, h6': [reviewProduct()],
+      '[role="dialog"]': [],
+    },
+  });
+  assert.equal(order.clicks, 1);
+  assert.equal(result.phase, 'order-submitted');
+});
+
+test('auto order refuses changed product, extra item, or quantity two on Apple review', async () => {
+  for (const product of [
+    reviewProduct('iPhone 18 Pro 256GB 白色'),
+    reviewProduct('iPhone 18 Pro 256GB 黑色', 2),
+    reviewProduct('iPhone 18 Pro 256GB 黑色', 1, true),
+  ]) {
+    const order = button('立即下单');
+    const result = await page({
+      pathname: '/shop/checkout', phase: 'guest-clicked',
+      flowProps: { pickupConfirmed: true, alipayConfirmed: true, productName: 'iPhone 18 Pro 256GB 黑色' },
+      orderConfig: { enabled: true, maxCny: 9999 },
+      selectors: {
+        '[data-autom="continue-button-placeOrder"]': [order],
+        'span, strong, b, dt, th, p, div': [totalLabel('9,999.00')],
+        'h1, h2, h3, h4, h5, h6': [product],
+        '[role="dialog"]': [],
+      },
+    });
+    assert.equal(order.clicks, 0);
+    assert.equal(result.phase, 'guest-clicked');
+  }
+});
+
+test('auto order refuses a task replaced in the desktop app', async () => {
+  const order = button('立即下单');
+  const result = await page({
+    pathname: '/shop/checkout', phase: 'guest-clicked', activeTask: false,
+    flowProps: { pickupConfirmed: true, alipayConfirmed: true, productName: 'iPhone 18 Pro 256GB 黑色' },
+    orderConfig: { enabled: true, maxCny: 9999 },
+    selectors: {
+      '[data-autom="continue-button-placeOrder"]': [order],
+      'span, strong, b, dt, th, p, div': [totalLabel('9,999.00')],
+      'h1, h2, h3, h4, h5, h6': [reviewProduct()],
+      '[role="dialog"]': [],
+    },
+  });
+  assert.equal(order.clicks, 0);
+  assert.equal(result.phase, 'guest-clicked');
+  assert.ok(result.sent.some((message) => message.type === 'apw-active-task'));
+});
+
+test('a restored but inactive task pauses checkout before selecting payment', async () => {
+  const continueButton = button('继续');
+  const result = await page({
+    pathname: '/shop/checkout', phase: 'guest-clicked', activeTask: false,
+    selectors: {
+      '[data-autom="continue-button-review"]': [continueButton],
+      '[role="dialog"]': [],
+    },
+  });
+  assert.equal(continueButton.clicks, 0);
+  assert.equal(result.phase, 'guest-clicked');
+  assert.ok(result.sent.some((message) => message.type === 'apw-active-task'));
+});
+
+test('auto order stops above the cap or when total or checkout confirmations are uncertain', async () => {
+  for (const [amount, flowProps, expected] of [
+    ['10,000.00', { pickupConfirmed: true, alipayConfirmed: true }, 'guest-clicked'],
+    ['9,999.00', { pickupConfirmed: false, alipayConfirmed: true }, 'guest-clicked'],
+    ['9,999.00', { pickupConfirmed: true, alipayConfirmed: false }, 'guest-clicked'],
+  ]) {
+    const order = button('现在下订单');
+    const result = await page({
+      pathname: '/shop/checkout', phase: 'guest-clicked', flowProps,
+      orderConfig: { enabled: true, maxCny: 9999 },
+      selectors: {
+        '[data-autom="continue-button-placeOrder"]': [order],
+        'span, strong, b, dt, th, p, div': [totalLabel(amount)],
+        '[role="dialog"]': [],
+      },
+    });
+    assert.equal(order.clicks, 0);
+    assert.equal(result.phase, expected);
+  }
+  const order = button('现在下订单');
+  const result = await page({
+    pathname: '/shop/checkout', phase: 'guest-clicked',
+    flowProps: { pickupConfirmed: true, alipayConfirmed: true },
+    orderConfig: { enabled: true, maxCny: 9999 },
+    selectors: { '[data-autom="continue-button-placeOrder"]': [order], '[role="dialog"]': [] },
+  });
+  assert.equal(order.clicks, 0);
+  assert.equal(result.phase, 'guest-clicked');
+});

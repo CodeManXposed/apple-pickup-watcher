@@ -155,10 +155,54 @@ pub struct Settings {
     pub open_bag_on_hit: bool,
     /// 有货时打开商品页，让配套浏览器扩展尝试把首个命中的型号加入购物袋。
     pub auto_add_to_bag: bool,
+    /// 每个监控目标的自动任务策略。没有配置的旧目标默认按补货模式运行。
+    pub task_plans: Vec<TaskPlan>,
     /// 代理地址列表，可空。每个代理是一条额外的出口线路，和直连轮流使用、被拦时
     /// 切换（见 [`crate::apple::ClientConfig::proxies`]）。只保留能解析、协议为
     /// http / https / socks5 / socks5h 的地址。
     pub proxies: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskMode {
+    #[default]
+    Restock,
+    Release,
+}
+
+/// 加车传输方式，与发售/补货触发方式独立。旧任务保持浏览器行为。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddMethod {
+    Api,
+    #[default]
+    Browser,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskPlan {
+    pub target_key: String,
+    pub mode: TaskMode,
+    #[serde(default)]
+    pub add_method: AddMethod,
+    /// 可选的 Apple 官方商品链接；为空时由 SKU 解析商品页。
+    #[serde(default)]
+    pub product_url: Option<String>,
+    /// UTC Unix 毫秒。发售模式必须填写；客户端按本地时区输入并转换。
+    pub release_at_ms: Option<u64>,
+    /// 自动任务重试间隔，独立于库存监控间隔。
+    #[serde(default = "default_task_retry_delay_ms")]
+    pub retry_delay_ms: u64,
+}
+
+pub const DEFAULT_TASK_RETRY_DELAY_MS: u64 = 3_000;
+pub const MIN_TASK_RETRY_DELAY_MS: u64 = 1_000;
+pub const MAX_TASK_RETRY_DELAY_MS: u64 = 60_000;
+
+fn default_task_retry_delay_ms() -> u64 {
+    DEFAULT_TASK_RETRY_DELAY_MS
 }
 
 /// 内置地区表里的第一个 locale，作为兜底取值。
@@ -180,6 +224,7 @@ impl Default for Settings {
             sound_enabled: true,
             open_bag_on_hit: true,
             auto_add_to_bag: false,
+            task_plans: Vec::new(),
             proxies: Vec::new(),
         }
     }
@@ -237,6 +282,17 @@ impl Settings {
             }
         }
         self.targets = kept;
+        let target_keys: std::collections::HashSet<String> =
+            self.targets.iter().map(|target| target.key().0).collect();
+        let mut plan_keys = std::collections::HashSet::new();
+        self.task_plans.retain(|plan| {
+            target_keys.contains(&plan.target_key) && plan_keys.insert(plan.target_key.clone())
+        });
+        for plan in &mut self.task_plans {
+            plan.retry_delay_ms = plan
+                .retry_delay_ms
+                .clamp(MIN_TASK_RETRY_DELAY_MS, MAX_TASK_RETRY_DELAY_MS);
+        }
 
         // 代理地址只留合法的：写错的留着只会让每一轮查询都撞一次「代理地址无效」。
         self.proxies = normalize_proxies(&self.proxies);
@@ -716,6 +772,7 @@ impl LegacySettings {
             sound_enabled: self.sound_enabled.unwrap_or(fallback.sound_enabled),
             open_bag_on_hit: self.open_bag_on_hit.unwrap_or(fallback.open_bag_on_hit),
             auto_add_to_bag: false,
+            task_plans: Vec::new(),
             // Go 版没有代理设置，迁移过来的文件一律从空开始。
             proxies: fallback.proxies,
         };

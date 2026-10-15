@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Apple Pickup Watcher · 结账资料</title>
+  <title>Apple Bot · 结账资料</title>
   <style>
     * { box-sizing: border-box; }
     body { margin: 0; background: #f5f5f7; color: #1d1d1f; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
@@ -14,7 +14,7 @@
     section { background: #fff; border: 1px solid #dedee2; border-radius: 16px; padding: 24px; margin: 16px 0; }
     .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
     label { display: block; font-weight: 600; font-size: 13px; }
-    input[type="text"], input[type="email"], input[type="tel"] { width: 100%; height: 40px; margin-top: 6px; padding: 8px 11px; border: 1px solid #aaaab0; border-radius: 8px; background: #fff; color: inherit; font: inherit; }
+    input[type="text"], input[type="email"], input[type="tel"], input[type="password"], input[type="number"] { width: 100%; height: 40px; margin-top: 6px; padding: 8px 11px; border: 1px solid #aaaab0; border-radius: 8px; background: #fff; color: inherit; font: inherit; }
     input:focus { outline: 2px solid #0071e3; outline-offset: 1px; }
     .wide { grid-column: 1 / -1; }
     .toggle { display: flex; align-items: center; gap: 10px; font-size: 15px; }
@@ -25,14 +25,14 @@
     button:hover { background: #0066cc; }
     button.secondary { background: #e8e8ed; color: #1d1d1f; }
     button.secondary:hover { background: #dedee3; }
-    #status { color: #17663a; }
+    #status { color: #515154; }
     @media (max-width: 600px) { main { margin-top: 24px; } .grid { grid-template-columns: 1fr; } .wide { grid-column: auto; } }
   </style>
 </head>
 <body>
   <main>
     <h1>结账资料</h1>
-    <p>资料仅保存在此 Chrome 扩展的本地存储中。进入 Apple 结账页时，只填用途明确的空白字段；请在下单前核对。不会填写付款卡资料，也不会提交订单。</p>
+    <p>资料仅保存在此 Chrome 扩展的本地存储中。进入 Apple 结账页时，只填用途明确的空白字段。自动下单须另行开启并设置单笔金额上限；支付宝付款仍由你完成。</p>
     <form id="profile-form">
       <section>
         <label class="toggle"><input type="checkbox" name="enabled" checked> 在 Apple 结账页自动填充</label>
@@ -66,9 +66,20 @@
           <label>邮政编码 <input type="text" name="delivery.postalCode" autocomplete="off"></label>
         </div>
       </section>
+      <section>
+        <h2>桌面应用连接</h2>
+        <p class="hint">在 Apple Bot 桌面应用中点「复制扩展连接码」，粘贴到下方并保存。页面会检查本机连接；连接成功后，支付宝付款链接会显示在应用中，并发送到已配置的 Discord webhook。</p>
+        <label>扩展连接码 <input type="password" name="bridgeToken" autocomplete="off" spellcheck="false"></label>
+      </section>
+      <section>
+        <h2>自动提交订单</h2>
+        <p class="hint">只用于本扩展自动加车产生的单件到店取货订单。扩展必须确认监控门店、支付宝和 Apple 确认页的唯一订单总额；无法确认或超出上限会停下。点击“现在下订单”会生成待付款订单，随后才可能出现支付宝链接。</p>
+        <label class="toggle"><input type="checkbox" name="autoPlaceOrder"> 允许自动点击 Apple“现在下订单”</label>
+        <label style="margin-top: 16px">单笔金额上限（人民币，含运费） <input type="number" name="maxOrderCny" min="1" max="1000000" step="1" inputmode="numeric" autocomplete="off" placeholder="例如 9999"></label>
+      </section>
       <div class="actions">
         <button type="submit">保存到此 Chrome</button>
-        <button class="secondary" id="clear-profile" type="button">删除已保存资料</button>
+        <button class="secondary" id="clear-profile" type="button">删除资料和连接码</button>
         <span id="status" role="status" aria-live="polite"></span>
       </div>
     </form>

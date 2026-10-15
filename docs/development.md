@@ -35,6 +35,27 @@ cargo test
 
 普通测试保持离线，不为 `cargo test` 添加 `--all-features` 或 `--features live`。Clippy 的 `--all-features` 只编译，不执行真实请求。
 
+### 独立浏览器流程冒烟测试
+
+修改自动加车、访客结账、Profile 填充或支付宝链接捕获时，可用 Chrome for Testing 跑一次浏览器级测试：
+
+```bash
+python3 -m pip install 'websockets==14.2'
+python3 scripts/browser-flow-smoke.py
+```
+
+浏览器不在 PATH 或应用本地浏览器目录时，用 `APW_CHROME_PATH` 指向 Chrome 可执行文件。脚本创建临时浏览器配置和扩展副本，把 Apple、支付宝页面及桌面桥接替换为本机测试服务，从商品页自动加车一直跑到虚构订单的付款链接。它验证同标签、新标签及无 opener 新标签跳转，二维码链接、没有二维码时的收银台链接、稍后出现的二维码，以及内嵌帧首次回传失败后的重试和二维码优先级。它不会访问真实商店、提交真实订单或改动日常浏览器资料；不纳入普通 CI，因为需要额外安装 Chrome 和 Python 的 `websockets` 包。
+
+### API 加车真实请求诊断
+
+需要确认 Apple 当前是否接受直连加车时，可显式指定 SKU 运行忽略的现场测试：
+
+```bash
+APW_LIVE_ADD_PART='MJT74CH/A' cargo test -p apw-app live_direct_add_diagnostic -- --ignored --nocapture
+```
+
+测试创建一次性 HTTP 会话，最多提交一次真实加车请求，不访问用户浏览器购物袋，也不进入结账；只有 Apple 明确返回目标 SKU 的加车成功页才通过。HTTP 541、验证页和无法确认的结果都会失败并显示原因。普通 `cargo test` 不会执行它。
+
 ## 代码结构
 
 | 目录 | 职责 |

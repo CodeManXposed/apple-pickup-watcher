@@ -89,10 +89,41 @@ export interface Settings {
   discordWebhook: string;
   soundEnabled: boolean;
   openBagOnHit: boolean;
-  /** 使用配套 Chrome 扩展，在首个到货目标的商品页尝试加入购物袋。 */
+  /** 使用独立 Chrome for Testing 会话和配套扩展，在首个到货目标的商品页尝试加入购物袋。 */
   autoAddToBag: boolean;
+  /** 每个监控目标的任务模式；旧目标没有配置时按补货模式。 */
+  taskPlans: TaskPlan[];
   /** 代理地址列表；每个代理是一条额外的出口线路，被拦时切换。可为空。 */
   proxies: string[];
+}
+
+export interface TaskPlan {
+  targetKey: string;
+  mode: "restock" | "release";
+  addMethod: "api" | "browser";
+  productUrl: string | null;
+  /** UTC Unix 毫秒；发售模式必须填写。 */
+  releaseAtMs: number | null;
+  retryDelayMs: number;
+}
+
+/** 最近一次浏览器结账流程得到的支付宝地址，由本机桥接推送。 */
+export interface PaymentLink {
+  url: string;
+  kind: "qr" | "cashier";
+  receivedAt: number;
+  taskId: string;
+}
+
+/** 独立浏览器中当前任务的进度，由本机桥接推送。 */
+export interface BotStatus {
+  partNumber: string;
+  storeNumber: string;
+  taskId: string;
+  stage: "starting" | "waitingRelease" | "waitingRoom" | "launched" | "bag" | "checkout" | "guest" | "privacy" | "profile" | "profileAction" |
+    "payment" | "review" | "orderSubmitted" | "paymentLink" | "failed";
+  updatedAt: number;
+  automationActive?: boolean;
 }
 
 /** 监控目标的唯一键，与 Rust 侧 Target::key 的构成保持一致。 */

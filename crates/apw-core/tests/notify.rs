@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use apw_core::notify::{Bark, Discord, Feishu, Multi, Notification, Notifier, NotifyError, Sound};
 
@@ -233,6 +233,94 @@ async fn discord使用post_json并保留通知内容() {
         "到货/提醒\n上海-环球港 iPhone 17 有货\nhttps://www.apple.com.cn/shop/bag?step=1&next=2"
     );
     assert_eq!(body["allowed_mentions"]["parse"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn discord轮换付款码编辑同一条消息() {
+    let server = TestServer::start("200 OK", r#"{"id":"123"}"#);
+    let webhook = format!(
+        "http://{}/api/webhooks/123/SECRET?thread_id=456&wait=false",
+        server.addr
+    );
+    let discord = Discord::new(webhook, client());
+    let first = Notification::new("Apple 支付宝付款链接", "首个二维码")
+        .with_url("https://qr.alipay.com/first");
+    let latest = Notification::new("Apple 支付宝付款链接", "更新后的二维码")
+        .with_url("https://qr.alipay.com/latest");
+    let id = discord
+        .send_or_edit(&first, None)
+        .await
+        .expect("首次发送应返回消息编号");
+    assert_eq!(id, "123");
+    assert_eq!(discord.send_or_edit(&latest, Some(&id)).await.unwrap(), id);
+    let lines = server.requests.lock().expect("读取请求");
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].starts_with("POST /api/webhooks/123/SECRET?"));
+    assert!(lines[0].contains("thread_id=456"));
+    assert!(lines[0].contains("wait=true"));
+    assert!(lines[1].starts_with("PATCH /api/webhooks/123/SECRET/messages/123?thread_id=456 "));
+    let bodies = server.bodies.lock().expect("读取正文");
+    let edited: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+    assert!(
+        edited["content"]
+            .as_str()
+            .unwrap()
+            .contains("https://qr.alipay.com/latest")
+    );
+    assert_eq!(edited["allowed_mentions"]["parse"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn discord连接失败后重试一次() {
+    let addr = closed_port();
+    let server = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        let listener = TcpListener::bind(addr).expect("重试前开始监听");
+        listener.set_nonblocking(true).expect("设置非阻塞监听");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut reader = BufReader::new(stream.try_clone().expect("复制连接"));
+                    let mut line = String::new();
+                    reader.read_line(&mut line).expect("读取请求行");
+                    assert!(line.starts_with("POST /api/webhooks/123/SECRET?"));
+                    let mut length = 0;
+                    loop {
+                        line.clear();
+                        reader.read_line(&mut line).expect("读取请求头");
+                        if line.trim().is_empty() {
+                            break;
+                        }
+                        if let Some((name, value)) = line.split_once(':')
+                            && name.eq_ignore_ascii_case("content-length")
+                        {
+                            length = value.trim().parse().expect("请求体长度");
+                        }
+                    }
+                    let mut body = vec![0; length];
+                    reader.read_exact(&mut body).expect("读取请求体");
+                    stream
+                        .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .expect("回复 Discord 测试请求");
+                    return;
+                }
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("没有收到重试请求：{err}"),
+            }
+        }
+    });
+    let webhook = format!("http://{addr}/api/webhooks/123/SECRET");
+    Discord::new(webhook, client())
+        .notify(&到货通知())
+        .await
+        .expect("仅连接失败时应重试并成功推送");
+    server.join().expect("测试服务端完成");
 }
 
 #[tokio::test]

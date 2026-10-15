@@ -105,6 +105,8 @@ pub enum NotifyError {
         channel: String,
         status: u16,
         body: String,
+        /// 仅明确限流时用于延迟重试，不把未确认送达的请求盲目重发。
+        retry_after: Option<Duration>,
     },
 
     /// 服务器回了 200，但在响应体里报了业务错误。
@@ -270,6 +272,7 @@ impl Notifier for Bark {
                 channel: self.name.clone(),
                 status: status.as_u16(),
                 body: summarize(&body),
+                retry_after: None,
             });
         }
 
@@ -603,6 +606,7 @@ impl Notifier for Feishu {
                 channel: self.name.clone(),
                 status: status.as_u16(),
                 body: summarize(&body),
+                retry_after: None,
             });
         }
 
@@ -688,6 +692,26 @@ fn feishu_business_error(body: &[u8]) -> Option<(i64, String)> {
 const DISCORD: &str = "Discord";
 const DISCORD_TIMEOUT: Duration = Duration::from_secs(10);
 
+fn discord_retry_after(headers: &reqwest::header::HeaderMap, body: &[u8]) -> Option<Duration> {
+    let duration = |seconds: f64| {
+        // 异常的等待值由调用方报告，不把付款链接发送任务挂上数小时。
+        (seconds.is_finite() && (0.0..=3_600.0).contains(&seconds))
+            .then(|| Duration::from_secs_f64(seconds))
+    };
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<f64>().ok())
+        .and_then(duration)
+        .or_else(|| {
+            serde_json::from_slice::<serde_json::Value>(body)
+                .ok()?
+                .get("retry_after")?
+                .as_f64()
+                .and_then(duration)
+        })
+}
+
 /// 向 Discord webhook 发送普通文本通知。
 #[derive(Debug, Clone)]
 pub struct Discord {
@@ -725,6 +749,110 @@ impl Discord {
     pub fn is_configured(&self) -> bool {
         !self.webhook.is_empty()
     }
+
+    async fn send_request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, NotifyError> {
+        // 连接或 TLS 握手失败时请求尚未送达 Discord，可以安全地重试一次。
+        // 已发出请求后的超时不重试，避免在 Discord 实际收下消息时重复推送。
+        let retry = request.try_clone();
+        let first = request.send().await;
+        match (first, retry) {
+            (Err(error), Some(retry)) if error.is_connect() => {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                retry.send().await
+            }
+            (other, _) => other,
+        }
+        .map_err(|e| NotifyError::Transport {
+            channel: self.name.clone(),
+            detail: describe_http_error(e),
+        })
+    }
+
+    /// 首次发送付款链接，随后编辑同一 webhook 消息中的轮换二维码。
+    /// 返回 Discord 消息 ID，由调用方按监控任务和 webhook 保存。
+    pub async fn send_or_edit(
+        &self,
+        n: &Notification,
+        message_id: Option<&str>,
+    ) -> Result<String, NotifyError> {
+        let mut url = validate_discord_webhook(&self.webhook)?;
+        let content = feishu_text(n);
+        if content.chars().count() > 2000 {
+            return Err(discord_config_err(
+                "消息超过 Discord 的 2000 字符限制".into(),
+            ));
+        }
+        let request = if let Some(id) = message_id {
+            if id.is_empty() || id.len() > 20 || !id.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(discord_config_err("已保存的 Discord 消息编号无效".into()));
+            }
+            let thread_id = url
+                .query_pairs()
+                .find(|(key, _)| key == "thread_id")
+                .map(|(_, value)| value.into_owned());
+            url.set_query(None);
+            url.path_segments_mut()
+                .map_err(|_| discord_config_err("Webhook 地址路径无效".into()))?
+                .extend(["messages", id]);
+            if let Some(thread_id) = thread_id {
+                url.query_pairs_mut().append_pair("thread_id", &thread_id);
+            }
+            self.http.patch(url)
+        } else {
+            let existing_query: Vec<_> = url
+                .query_pairs()
+                .filter(|(key, _)| key != "wait")
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect();
+            url.set_query(None);
+            {
+                let mut query = url.query_pairs_mut();
+                query.extend_pairs(existing_query);
+                query.append_pair("wait", "true");
+            }
+            self.http.post(url)
+        };
+        let mut response = self
+            .send_request(request.timeout(self.timeout).json(&serde_json::json!({
+                "content": content,
+                "allowed_mentions": { "parse": [] },
+            })))
+            .await?;
+        let status = response.status();
+        let retry_header = response.headers().clone();
+        let body = read_capped(&mut response, BARK_MAX_BODY, &self.name).await?;
+        if !status.is_success() {
+            return Err(NotifyError::Rejected {
+                channel: self.name.clone(),
+                status: status.as_u16(),
+                body: summarize(&body),
+                retry_after: (status == reqwest::StatusCode::TOO_MANY_REQUESTS)
+                    .then(|| discord_retry_after(&retry_header, &body))
+                    .flatten(),
+            });
+        }
+        if let Some(id) = message_id {
+            return Ok(id.to_owned());
+        }
+        let id = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value.get("id")?.as_str().map(str::to_owned));
+        match id {
+            Some(id)
+                if !id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit()) =>
+            {
+                Ok(id)
+            }
+            _ => Err(NotifyError::Remote {
+                channel: self.name.clone(),
+                code: -1,
+                message: "Discord 未返回消息编号，无法更新轮换的付款链接".into(),
+            }),
+        }
+    }
 }
 
 impl Notifier for Discord {
@@ -756,28 +884,27 @@ impl Notifier for Discord {
                 "消息超过 Discord 的 2000 字符限制".to_string(),
             ));
         }
-        let mut resp = self
+        let request = self
             .http
             .post(url)
             .timeout(self.timeout)
             .json(&serde_json::json!({
                 "content": content,
                 "allowed_mentions": { "parse": [] },
-            }))
-            .send()
-            .await
-            .map_err(|e| NotifyError::Transport {
-                channel: self.name.clone(),
-                detail: describe_http_error(e),
-            })?;
+            }));
+        let mut resp = self.send_request(request).await?;
 
         let status = resp.status();
+        let retry_header = resp.headers().clone();
         let body = read_capped(&mut resp, BARK_MAX_BODY, &self.name).await?;
         if !status.is_success() {
             return Err(NotifyError::Rejected {
                 channel: self.name.clone(),
                 status: status.as_u16(),
                 body: summarize(&body),
+                retry_after: (status == reqwest::StatusCode::TOO_MANY_REQUESTS)
+                    .then(|| discord_retry_after(&retry_header, &body))
+                    .flatten(),
             });
         }
         Ok(())
@@ -1255,6 +1382,34 @@ impl Notifier for Multi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discord_rate_limit_waits_for_header_or_body_without_accepting_bad_values() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "0.25".parse().unwrap());
+        assert_eq!(
+            discord_retry_after(&headers, br#"{"retry_after":1.5}"#),
+            Some(Duration::from_millis(250))
+        );
+        headers.clear();
+        assert_eq!(
+            discord_retry_after(&headers, br#"{"retry_after":1.5}"#),
+            Some(Duration::from_millis(1_500))
+        );
+        assert_eq!(
+            discord_retry_after(&headers, br#"{"retry_after":-1}"#),
+            None
+        );
+        assert_eq!(
+            discord_retry_after(&headers, br#"{"retry_after":99999}"#),
+            None
+        );
+        headers.insert(reqwest::header::RETRY_AFTER, "-1".parse().unwrap());
+        assert_eq!(
+            discord_retry_after(&headers, br#"{"retry_after":0.5}"#),
+            Some(Duration::from_millis(500))
+        );
+    }
 
     fn n(title: &str, body: &str) -> Notification {
         Notification::new(title, body)

@@ -4,12 +4,16 @@ import { loadSource } from "./load-source.mjs";
 
 function renderApp() {
   const saved = [];
+  let browserOpens = 0;
+  let startFailure = null;
+  let saveFailure = null;
+  let savePending = null;
   const addedTargets = [];
   const pushSaves = [];
   const state = {
-    settings: { locale: "zh_CN", barkUrl: "https://api.day.app/saved-key", intervalSeconds: 30 },
+    settings: { locale: "zh_CN", barkUrl: "https://api.day.app/saved-key", intervalSeconds: 30, autoAddToBag: false },
     stores: [], products: [], rows: [], regions: [], categories: [], logs: [],
-    category: "iphone", trouble: null, update: null,
+    category: "iphone", trouble: null, update: null, pacing: null,
   };
   const hooks = [];
   let cursor = 0;
@@ -27,7 +31,14 @@ function renderApp() {
     };
     if (specifier === "@/lib/store") return {
       watcherStore: { getSnapshot: () => state },
-      saveSettings: async (settings) => { saved.push(settings); state.settings = settings; },
+      openBotBrowser: async () => { browserOpens++; },
+      startWatching: async () => { if (startFailure) throw startFailure; },
+      saveSettings: async (settings) => {
+        if (savePending) await savePending;
+        if (saveFailure) return `保存设置失败：${saveFailure}`;
+        saved.push(settings); state.settings = settings;
+        return null;
+      },
       setTargets: async (targets) => { addedTargets.push(targets); },
       setCategory: (category) => { state.category = category; },
       changeLocale: async (locale) => { state.settings = { ...state.settings, locale }; },
@@ -92,9 +103,35 @@ function renderApp() {
     hasAddPush: () => all(isAddPush).length > 0,
     choice: (placeholder) => control((element) => element?.props?.placeholder === placeholder),
     addButton: () => control((element) => element.type === "Button" &&
-      Array.isArray(element.props.children) && element.props.children.includes(" 添加")),
+      Array.isArray(element.props.children) && element.props.children.includes(" 添加到监控")),
+    manualSku: () => control((element) => element?.props?.id === "manual-sku"),
+    addManualSku: () => control((element) => element?.type === "Button" &&
+      element.props.children === "添加 SKU"),
     scaleHint: () => control((element) => element.type === "span" &&
       Array.isArray(element.props.children) && element.props.children.includes(" 个型号 × ")),
+    tab: (name) => control((element) => element?.props?.id === `workspace-tab-${name}`),
+    panelIds: () => all((element) => element?.props?.role === "tabpanel").map((element) => element.props.id),
+    taskSwitch: () => control((element) => element?.props?.id === "autoadd"),
+    taskMode: (key) => control((element) => element?.props?.id === `task-mode-${key}`),
+    taskAddMethod: (key, method) => control((element) => element?.props?.id === `task-add-method-${method}-${key}`),
+    taskSku: (key) => control((element) => element?.props?.id === `task-sku-${key}`),
+    taskProductUrl: (key) => control((element) => element?.props?.id === `task-product-url-${key}`),
+    taskRelease: (key) => control((element) => element?.props?.id === `task-release-${key}`),
+    taskRetry: (key) => control((element) => element?.props?.id === `task-retry-${key}`),
+    taskRows: () => all((element) => element?.type === "TableRow").length,
+    taskProgressText: () => all((element) => element?.type === "p" && typeof element.props?.children === "string")
+      .map((element) => element.props.children).find((value) => value.includes("上次任务进度") || value.includes("正在核对订单")),
+    profileSetupButton: () => control((element) => element?.type === "Button" && element.props.children === "准备独立浏览器"),
+    profileEditorButton: () => control((element) => element?.type === "Button" && element.props.children === "打开 Profile 编辑器"),
+    startButton: () => control((element) => element?.props?.["aria-label"] === "开始监控"),
+    alerts: () => all((element) => element?.props?.role === "alert").map((element) => JSON.stringify(element.props)),
+    setStartFailure: (error) => { startFailure = error; },
+    setSaveFailure: (error) => { saveFailure = error; },
+    setSavePending: (pending) => { savePending = pending; },
+    browserOpens: () => browserOpens,
+    paymentLinks: () => all((element) => element?.type === "a" &&
+      typeof element.props.href === "string" && element.props.href.includes("alipay.com"))
+      .map((element) => element.props),
     state, saved, addedTargets, pushSaves,
   };
 }
@@ -103,6 +140,196 @@ const K1 = "https://api.day.app/k1";
 const K2 = "https://api.day.app/k2";
 const F1 = "https://open.feishu.cn/open-apis/bot/v2/hook/f1";
 const D1 = "https://discord.com/api/webhooks/123/token";
+
+test("monitor, Profile, and task pages keep their controls separate", () => {
+  const app = renderApp();
+  assert.deepEqual(app.panelIds(), ["workspace-panel-monitor"]);
+  assert.equal(app.tab("monitor")["aria-selected"], true);
+  assert.deepEqual(app.pushValues(), ["https://api.day.app/saved-key"]);
+
+  app.tab("profile").onClick();
+  assert.deepEqual(app.panelIds(), ["workspace-panel-profile"]);
+  assert.equal(app.tab("profile")["aria-selected"], true);
+  assert.equal(app.tab("monitor")["aria-selected"], false);
+  assert.equal(app.profileSetupButton().disabled, false);
+  app.profileEditorButton().onClick();
+  assert.equal(app.browserOpens(), 1);
+
+  app.tab("tasks").onClick();
+  assert.deepEqual(app.panelIds(), ["workspace-panel-tasks"]);
+  assert.equal(app.taskSwitch().checked, false);
+  app.taskSwitch().onCheckedChange(true);
+  assert.equal(app.saved.at(-1).autoAddToBag, true);
+
+  app.tab("monitor").onClick();
+  assert.deepEqual(app.panelIds(), ["workspace-panel-monitor"]);
+  assert.deepEqual(app.pushValues(), ["https://api.day.app/saved-key"]);
+});
+
+test("each task saves release time and retry delay independently", async () => {
+  const app = renderApp();
+  const target = {
+    locale: "zh_CN", storeNumber: "R683", storeTitle: "测试门店",
+    partNumber: "MJYE4CH/A", productName: "测试商品",
+  };
+  const key = "zh_CN|R683|MJYE4CH/A";
+  app.state.settings = { ...app.state.settings, targets: [target], taskPlans: [] };
+  app.state.rows = [{ target, availability: { kind: "out_of_stock" } }];
+  app.tab("tasks").onClick();
+  assert.equal(app.taskMode(key).value, "restock");
+  assert.equal(app.taskAddMethod(key, "browser").checked, true);
+  assert.equal(app.taskAddMethod(key, "api").checked, false);
+  assert.equal(app.taskRetry(key).value, "3000");
+  assert.equal(app.taskRelease(key).disabled, true);
+
+  app.taskMode(key).onChange({ target: { value: "release" } });
+  await new Promise(setImmediate);
+  assert.equal(app.saved.at(-1).taskPlans[0].mode, "release");
+  assert.equal(app.taskRelease(key).disabled, false);
+
+  app.taskAddMethod(key, "api").onChange();
+  await new Promise(setImmediate);
+  assert.equal(app.saved.at(-1).taskPlans[0].addMethod, "api");
+  assert.equal(app.taskAddMethod(key, "api").checked, true);
+  assert.equal(app.taskSku(key).value, target.partNumber);
+  assert.equal(app.taskSku(key).readOnly, true);
+  assert.equal(app.taskProductUrl(key).defaultValue, "");
+  const productUrl = "https://www.apple.com.cn/shop/pdpAddToBag/MJYE4CH/A";
+  app.taskProductUrl(key).onBlur({ target: { value: productUrl } });
+  await new Promise(setImmediate);
+  assert.equal(app.saved.at(-1).taskPlans[0].productUrl, productUrl);
+
+  app.taskAddMethod(key, "browser").onChange();
+  await new Promise(setImmediate);
+  assert.equal(app.taskAddMethod(key, "browser").checked, true);
+  app.taskAddMethod(key, "api").onChange();
+  await new Promise(setImmediate);
+  assert.equal(app.saved.at(-1).taskPlans[0].productUrl, productUrl);
+
+  app.taskRelease(key).onChange({ target: { value: "2099-01-02T03:04" } });
+  app.taskRelease(key).onBlur({ target: { value: "2099-01-02T03:04" } });
+  await new Promise(setImmediate);
+  assert.equal(app.saved.at(-1).taskPlans[0].releaseAtMs, new Date("2099-01-02T03:04").getTime());
+
+  app.taskRetry(key).onChange({ target: { value: "5000" } });
+  app.taskRetry(key).onBlur({ target: { value: "5000" } });
+  await new Promise(setImmediate);
+  assert.equal(app.saved.at(-1).taskPlans[0].retryDelayMs, 5000);
+
+  const saves = app.saved.length;
+  app.taskRetry(key).onBlur({ target: { value: "500" } });
+  assert.equal(app.saved.length, saves);
+  assert.match(app.alerts().join(" "), /1000–60000/);
+});
+
+test("a new SKU can be added for the selected store before it enters the catalog", async () => {
+  const app = renderApp();
+  app.state.stores = [{ number: "R683", title: "环球港" }];
+  app.choice("选择自提门店").onChange(["R683"]);
+  app.manualSku().onChange({ target: { value: "A".repeat(21) + "/A" } });
+  assert.equal(app.addManualSku().disabled, true);
+  app.manualSku().onChange({ target: { value: " mjt74ch/a " } });
+  assert.equal(app.addManualSku().disabled, false);
+  app.addManualSku().onClick();
+  await new Promise(setImmediate);
+  assert.deepEqual(app.addedTargets.at(-1), [{
+    locale: "zh_CN", storeNumber: "R683", storeTitle: "环球港",
+    partNumber: "MJT74CH/A", productName: "SKU MJT74CH/A",
+  }]);
+  assert.equal(app.manualSku().value, "");
+});
+
+test("workspace tabs support keyboard navigation and one tab stop", () => {
+  const app = renderApp();
+  const focused = [];
+  let prevented = 0;
+  const event = (key) => ({
+    key,
+    preventDefault() { prevented++; },
+    currentTarget: { ownerDocument: { getElementById(id) {
+      return { focus() { focused.push(id); } };
+    } } },
+  });
+  assert.equal(app.tab("monitor").tabIndex, 0);
+  assert.equal(app.tab("profile").tabIndex, -1);
+  app.tab("monitor").onKeyDown(event("ArrowRight"));
+  assert.deepEqual(app.panelIds(), ["workspace-panel-profile"]);
+  assert.equal(app.tab("profile").tabIndex, 0);
+  app.tab("profile").onKeyDown(event("End"));
+  assert.deepEqual(app.panelIds(), ["workspace-panel-tasks"]);
+  app.tab("tasks").onKeyDown(event("ArrowRight"));
+  assert.deepEqual(app.panelIds(), ["workspace-panel-monitor"]);
+  assert.equal(prevented, 3);
+  assert.deepEqual(focused, ["workspace-tab-profile", "workspace-tab-tasks", "workspace-tab-monitor"]);
+});
+
+test("the task page displays the latest cashier or QR payment link", () => {
+  const app = renderApp();
+  const cashier = "https://excashier.alipay.com/payment.htm?order=test";
+  const qr = "https://qr.alipay.com/test-code";
+  app.state.botStatus = { partNumber: "MJYE4CH/A", storeNumber: "R683", taskId: "current", stage: "paymentLink", updatedAt: 1 };
+  app.state.paymentLink = { url: cashier, kind: "cashier", receivedAt: 1, taskId: "current" };
+  assert.deepEqual(app.paymentLinks(), [], "the monitor page should not display checkout links");
+  app.tab("tasks").onClick();
+  assert.equal(app.paymentLinks()[0].href, cashier);
+  app.state.paymentLink = { url: qr, kind: "qr", receivedAt: 2, taskId: "current" };
+  assert.equal(app.paymentLinks()[0].href, qr, "a refreshed QR link should replace the cashier link");
+  app.state.botStatus = { ...app.state.botStatus, taskId: "next", stage: "starting" };
+  assert.deepEqual(app.paymentLinks(), [], "a late payment event from the previous task must stay hidden");
+});
+
+test("restored checkout progress explains that automatic actions are paused", () => {
+  const app = renderApp();
+  app.state.botStatus = {
+    partNumber: "MJYE4CH/A", storeNumber: "R683", taskId: "restored",
+    stage: "review", updatedAt: 1, automationActive: false,
+  };
+  app.tab("tasks").onClick();
+  assert.match(app.taskProgressText(), /自动操作已暂停/);
+  app.state.botStatus = { ...app.state.botStatus, automationActive: true };
+  assert.match(app.taskProgressText(), /正在核对订单总额/);
+});
+
+test("a failed browser preflight is visible without starting monitoring", async () => {
+  const app = renderApp();
+  app.state.settings.autoAddToBag = true;
+  app.state.rows = [{
+    target: { partNumber: "TEST/A", storeNumber: "R001", productName: "测试商品", storeTitle: "测试门店" },
+    availability: { kind: "pending" },
+  }];
+  app.setStartFailure(new Error("缺少取货资料"));
+  app.startButton().onClick();
+  await new Promise(setImmediate);
+  assert.match(app.alerts().join(" "), /缺少取货资料/);
+  assert.equal(app.state.running, undefined);
+});
+
+test("enabling auto add while running shows a preflight failure beside the task switch", async () => {
+  const app = renderApp();
+  app.state.running = true;
+  app.setSaveFailure("扩展连接码不匹配");
+  app.tab("tasks").onClick();
+  app.taskSwitch().onCheckedChange(true);
+  await new Promise(setImmediate);
+  assert.equal(app.taskSwitch().checked, false);
+  assert.match(app.alerts().join(" "), /扩展连接码不匹配/);
+});
+
+test("monitor start waits while auto add readiness is being saved", async () => {
+  const app = renderApp();
+  app.state.rows = [{
+    target: { partNumber: "TEST/A", storeNumber: "R001", productName: "测试商品", storeTitle: "测试门店" },
+    availability: { kind: "pending" },
+  }];
+  let finishSave;
+  app.setSavePending(new Promise((resolve) => { finishSave = resolve; }));
+  app.tab("tasks").onClick();
+  app.taskSwitch().onCheckedChange(true);
+  assert.equal(app.startButton().disabled, true);
+  finishSave();
+  await new Promise(setImmediate);
+  assert.equal(app.startButton().disabled, false);
+});
 
 test("saved push addresses are one list with channel labels", () => {
   const app = renderApp();

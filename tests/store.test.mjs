@@ -19,6 +19,7 @@ function catalog(locale, revision = "initial") {
 function setup() {
   const calls = [];
   const handlers = {};
+  const events = {};
   const store = loadSource("src/lib/store.ts", (specifier) => {
     if (specifier === "@tauri-apps/api/core") return {
       invoke: async (command, args) => {
@@ -30,10 +31,75 @@ function setup() {
         throw new Error(`Unexpected command: ${command}`);
       },
     };
-    if (specifier === "@tauri-apps/api/event") return {};
+    if (specifier === "@tauri-apps/api/event") return {
+      listen: async (channel, handler) => {
+        events[channel] = handler;
+        return () => { delete events[channel]; };
+      },
+    };
   });
-  return { ...store, snapshot: store.watcherStore.getSnapshot, calls, handlers };
+  return {
+    ...store, snapshot: store.watcherStore.getSnapshot, calls, handlers,
+    emit: (channel, payload) => events[channel]?.({ payload }),
+  };
 }
+
+test("a new checkout task removes the preceding payment link from the desktop state", async () => {
+  const app = setup();
+  const oldLink = { url: "https://qr.alipay.com/old", kind: "qr", receivedAt: 1, taskId: "old" };
+  const oldStatus = { partNumber: "MJYE4CH/A", storeNumber: "R683", taskId: "old", stage: "paymentLink", updatedAt: 1 };
+  Object.assign(app.handlers, {
+    list_regions: () => [], list_categories: () => [],
+    get_settings: () => app.snapshot().settings,
+    get_snapshot: () => [], is_running: () => true,
+    get_payment_link: () => oldLink, get_bot_status: () => oldStatus,
+    check_for_update: () => null,
+  });
+  await app.connect();
+  assert.equal(app.snapshot().paymentLink?.url, oldLink.url);
+
+  app.emit("watcher://payment-link", null);
+  app.emit("watcher://bot-status", { ...oldStatus, taskId: "new", stage: "starting", updatedAt: 2 });
+  assert.equal(app.snapshot().paymentLink, null);
+  assert.equal(app.snapshot().botStatus.stage, "starting");
+  app.emit("watcher://payment-link", { url: "https://qr.alipay.com/new", kind: "qr", receivedAt: 3, taskId: "new" });
+  assert.equal(app.snapshot().paymentLink?.url, "https://qr.alipay.com/new");
+  app.emit("watcher://payment-link", oldLink);
+  assert.equal(app.snapshot().paymentLink?.url, "https://qr.alipay.com/new", "late old events cannot replace the current link");
+  app.handlers.get_bot_status = () => app.snapshot().botStatus;
+  app.emit("watcher://bot-status", oldStatus);
+  await new Promise(setImmediate);
+  assert.equal(app.snapshot().botStatus.taskId, "new", "late old status events cannot replace the current task");
+
+  const verification = deferred();
+  app.handlers.get_bot_status = () => verification.promise;
+  app.emit("watcher://bot-status", oldStatus);
+  app.emit("watcher://bot-status", { ...oldStatus, taskId: "third", stage: "starting", updatedAt: 4 });
+  verification.resolve(oldStatus);
+  await new Promise(setImmediate);
+  assert.equal(app.snapshot().botStatus.taskId, "third", "a delayed verification cannot roll back a newer task");
+});
+
+test("the payment stage recovers a link event received before its task status", async () => {
+  const app = setup();
+  const link = { url: "https://qr.alipay.com/current", kind: "qr", receivedAt: 2, taskId: "current" };
+  Object.assign(app.handlers, {
+    list_regions: () => [], list_categories: () => [],
+    get_settings: () => app.snapshot().settings,
+    get_snapshot: () => [], is_running: () => true,
+    get_payment_link: () => null,
+    get_bot_status: () => ({ partNumber: "MJYE4CH/A", storeNumber: "R683", taskId: "previous", stage: "starting", updatedAt: 1 }),
+    check_for_update: () => null,
+  });
+  await app.connect();
+  app.handlers.get_payment_link = () => link;
+  app.handlers.get_bot_status = () => ({ partNumber: "MJYE4CH/A", storeNumber: "R683", taskId: "current", stage: "paymentLink", updatedAt: 2 });
+  app.emit("watcher://payment-link", link);
+  assert.equal(app.snapshot().paymentLink, null, "a link for another task waits for its status");
+  app.emit("watcher://bot-status", { partNumber: "MJYE4CH/A", storeNumber: "R683", taskId: "current", stage: "paymentLink", updatedAt: 2 });
+  await new Promise(setImmediate);
+  assert.equal(app.snapshot().paymentLink?.url, link.url);
+});
 
 test("a completed refresh for the previous locale cannot replace the selected catalog", async () => {
   const app = setup();
@@ -115,6 +181,16 @@ test("a failed locale save keeps the original locale and catalog without loading
   assert.deepEqual(app.snapshot().products, catalog("zh_CN").products);
   assert.deepEqual(app.calls.slice(count).map((call) => call.command), ["save_settings"]);
   assert.match(app.snapshot().logs.at(-1), /保存设置失败.*disk full/);
+});
+
+test("a rejected settings save returns the reason for inline task feedback", async () => {
+  const app = setup();
+  const before = app.snapshot().settings;
+  app.handlers.save_settings = () => { throw new Error("扩展连接码不匹配"); };
+  const error = await app.saveSettings({ ...before, autoAddToBag: true });
+  assert.match(error, /扩展连接码不匹配/);
+  assert.equal(app.snapshot().settings, before);
+  assert.match(app.snapshot().logs.at(-1), /扩展连接码不匹配/);
 });
 
 test("a delayed settings save that restores the old locale also restores its matching catalog", async () => {

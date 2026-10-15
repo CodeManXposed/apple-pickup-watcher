@@ -24,7 +24,18 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-notification = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
 reqwest.workspace = true
+wreq = { version = "0.16", default-features = false, features = ["cookies", "gzip", "brotli", "query", "stream", "webpki-roots", "tokio-rt", "socks"] }
+wreq-util = { version = "0.2", default-features = false, features = ["emulation"] }
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+base64 = "0.22"
+sha2 = "0.10"
+tempfile = "3"
+tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+tokio = { workspace = true, features = ["net", "io-util"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }

@@ -24,7 +24,18 @@
   ];
   let profile = null;
   let scheduled = false;
+  let activeCheck = null;
   const filled = new WeakSet();
+
+  function currentTask() {
+    if (!activeCheck) {
+      activeCheck = Promise.resolve()
+        .then(() => chrome.runtime.sendMessage({ type: 'apw-active-task' }))
+        .then(Boolean, () => false)
+        .finally(() => { activeCheck = null; });
+    }
+    return activeCheck;
+  }
 
   function readable(value) {
     return String(value || '').replace(/([a-z])([A-Z])/g, '$1 $2');
@@ -79,7 +90,7 @@
   function canFill(field) {
     if (filled.has(field) || field.disabled || field.readOnly || field.value.trim()) return false;
     if (field.getClientRects().length === 0) return false;
-    if (field.tagName === 'TEXTAREA') return true;
+    if (field.tagName === 'TEXTAREA' || field.tagName === 'SELECT') return true;
     if (field.tagName !== 'INPUT') return false;
     if (!['text', 'email', 'tel'].includes(field.type)) return false;
     return true;
@@ -87,7 +98,8 @@
 
   function setValue(field, value) {
     const prototype = field.tagName === 'TEXTAREA'
-      ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      ? HTMLTextAreaElement.prototype
+      : field.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
     const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
     if (setter) setter.call(field, value);
     else field.value = value;
@@ -96,14 +108,31 @@
     field.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
-  function fill() {
+  function exactOption(field, value) {
+    const wanted = value.trim().toLocaleLowerCase();
+    const matches = Array.from(field.options || []).filter((option) =>
+      !option.disabled && option.value.trim() &&
+      [option.value, option.textContent || ''].some((text) => text.trim().toLocaleLowerCase() === wanted));
+    return matches.length === 1 ? matches[0].value : null;
+  }
+
+  async function fill() {
     if (!profile?.enabled || !CHECKOUT_PATH.test(location.pathname)) return;
-    for (const field of document.querySelectorAll('input, textarea')) {
+    if (!await currentTask()) return;
+    for (const field of document.querySelectorAll('input, textarea, select')) {
       if (!canFill(field)) continue;
       const target = fieldTarget(field);
       const value = target && profile[target.context]?.[target.key];
-      if (typeof value === 'string' && value.trim()) setValue(field, value.trim());
+      if (typeof value !== 'string' || !value.trim()) continue;
+      if (field.tagName === 'SELECT') {
+        const optionValue = exactOption(field, value);
+        if (optionValue !== null) setValue(field, optionValue);
+      } else {
+        setValue(field, value.trim());
+      }
     }
+    // 结账脚本等待此标记，再尝试点击联系人/配送资料页的“继续”。
+    document.documentElement.setAttribute('data-apw-profile-fill-ready', '1');
   }
 
   function schedule() {
@@ -111,6 +140,8 @@
     scheduled = true;
     setTimeout(() => { scheduled = false; fill(); }, 120);
   }
+
+  window.addEventListener('apw-request-profile-fill', fill);
 
   chrome.storage.local.get(STORAGE_KEY).then((result) => {
     profile = result[STORAGE_KEY] || null;

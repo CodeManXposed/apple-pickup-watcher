@@ -16,7 +16,9 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Category,
   CategoryOption,
+  BotStatus,
   Product,
+  PaymentLink,
   Region,
   Settings,
   Store,
@@ -30,6 +32,8 @@ import { assertNever, describeAvailability, isUntrusted } from "./types";
 
 const EVENT_CHANNEL = "watcher://event";
 const NOTICE_CHANNEL = "watcher://notice";
+const PAYMENT_CHANNEL = "watcher://payment-link";
+const BOT_STATUS_CHANNEL = "watcher://bot-status";
 const MAX_LOG_LINES = 300;
 
 export interface UiState {
@@ -43,6 +47,8 @@ export interface UiState {
    */
   pacing: { nextCheckInSecs: number; paced: boolean } | null;
   logs: string[];
+  paymentLink: PaymentLink | null;
+  botStatus: BotStatus | null;
   regions: Region[];
   categories: CategoryOption[];
   stores: Store[];
@@ -75,6 +81,7 @@ const DEFAULT_SETTINGS: Settings = {
   soundEnabled: true,
   openBagOnHit: true,
   autoAddToBag: false,
+  taskPlans: [],
   proxies: [],
 };
 
@@ -84,6 +91,8 @@ let state: UiState = {
   trouble: null,
   pacing: null,
   logs: [],
+  paymentLink: null,
+  botStatus: null,
   regions: [],
   categories: [],
   stores: [],
@@ -184,6 +193,25 @@ function applyEvent(event: WatcherEvent): void {
 
 let unlisteners: UnlistenFn[] = [];
 let starting: Promise<void> | null = null;
+let paymentEventSerial = 0;
+let botStatusEventSerial = 0;
+
+function applyBotStatus(status: BotStatus): void {
+  botStatusEventSerial += 1;
+  if (state.botStatus?.taskId !== status.taskId) paymentEventSerial += 1;
+  update({
+    botStatus: status,
+    paymentLink: state.paymentLink?.taskId === status.taskId ? state.paymentLink : null,
+  });
+  // 付款事件可能比状态事件先到；按后端当前任务重新读取一次即可恢复。
+  if (status.stage === "paymentLink" && !state.paymentLink) {
+    void invoke<PaymentLink | null>("get_payment_link").then((link) => {
+      if (link?.taskId === status.taskId && state.botStatus?.taskId === status.taskId && !state.paymentLink) {
+        update({ paymentLink: link });
+      }
+    }).catch(() => {});
+  }
+}
 
 /**
  * 连接后端。重复调用是安全的。
@@ -199,16 +227,51 @@ export function connect(): Promise<void> {
       listen<WatcherEvent>(EVENT_CHANNEL, (e) => applyEvent(e.payload)),
       // 这条通道不只在启动时用：发提醒失败、打开购物袋失败也走这里，前缀不能写死成「启动」。
       listen<string>(NOTICE_CHANNEL, (e) => pushLog(`提示：${e.payload}`)),
+      listen<PaymentLink | null>(PAYMENT_CHANNEL, (e) => {
+        if (e.payload === null) {
+          paymentEventSerial += 1;
+          update({ paymentLink: null });
+          return;
+        }
+        if (state.botStatus && e.payload.taskId !== state.botStatus.taskId) return;
+        paymentEventSerial += 1;
+        update({ paymentLink: e.payload });
+        if (state.botStatus?.taskId === e.payload.taskId) {
+          pushLog("已收到支付宝付款链接，请核对商家与金额。");
+        }
+      }),
+      listen<BotStatus>(BOT_STATUS_CHANNEL, (e) => {
+        if (state.botStatus && e.payload.taskId !== state.botStatus.taskId && e.payload.stage !== "starting") {
+          // 若漏收新任务的 starting，向后端确认后接纳后续阶段；旧任务迟到事件会被拒绝。
+          const observedTaskId = state.botStatus.taskId;
+          void invoke<BotStatus | null>("get_bot_status").then((current) => {
+            if (state.botStatus?.taskId === observedTaskId && current?.taskId === e.payload.taskId) {
+              applyBotStatus(current);
+            }
+          }).catch(() => {});
+          return;
+        }
+        applyBotStatus(e.payload);
+      }),
     ]);
 
-    const [regions, categories, settings, rows, running] = await Promise.all([
+    const paymentSerialAtLoad = paymentEventSerial;
+    const statusSerialAtLoad = botStatusEventSerial;
+    const [regions, categories, settings, rows, running, paymentLink, botStatus] = await Promise.all([
       invoke<Region[]>("list_regions"),
       invoke<CategoryOption[]>("list_categories"),
       invoke<Settings>("get_settings"),
       invoke<TargetState[]>("get_snapshot"),
       invoke<boolean>("is_running"),
+      invoke<PaymentLink | null>("get_payment_link"),
+      invoke<BotStatus | null>("get_bot_status"),
     ]);
-    update({ regions, categories, settings, rows, running, ready: true });
+    update({
+      regions, categories, settings, rows, running,
+      paymentLink: paymentEventSerial === paymentSerialAtLoad ? paymentLink : state.paymentLink,
+      botStatus: botStatusEventSerial === statusSerialAtLoad ? botStatus : state.botStatus,
+      ready: true,
+    });
     await loadCatalog(settings.locale);
     // 启动时静默查一次。查不到就算了，不打扰用户 —— 网络不通、GitHub 抽风
     // 都会走到这里，跟「有没有新版本」是两回事。
@@ -249,7 +312,7 @@ export async function loadCatalog(locale: string): Promise<void> {
   }
 }
 
-export async function saveSettings(next: Settings): Promise<void> {
+export async function saveSettings(next: Settings): Promise<string | null> {
   try {
     const saved = await invoke<Settings>("save_settings", { settings: next });
     if (saved.locale !== state.settings.locale) {
@@ -260,8 +323,11 @@ export async function saveSettings(next: Settings): Promise<void> {
     } else {
       update({ settings: saved });
     }
+    return null;
   } catch (err) {
-    pushLog(`保存设置失败：${String(err)}`);
+    const message = `保存设置失败：${String(err)}`;
+    pushLog(message);
+    return message;
   }
 }
 
@@ -291,7 +357,9 @@ export async function changeLocale(locale: string): Promise<void> {
 export async function setTargets(targets: Target[]): Promise<void> {
   try {
     const rows = await invoke<TargetState[]>("set_targets", { targets });
-    update({ rows, settings: { ...state.settings, targets } });
+    const keys = new Set(targets.map((target) => `${target.locale}|${target.storeNumber}|${target.partNumber}`));
+    update({ rows, settings: { ...state.settings, targets,
+      taskPlans: (state.settings.taskPlans ?? []).filter((plan) => keys.has(plan.targetKey)) } });
   } catch (err) {
     pushLog(`更新监控列表失败：${String(err)}`);
   }
@@ -361,6 +429,56 @@ export async function openExtensionFolder(): Promise<void> {
     await invoke("open_extension_folder");
   } catch (err) {
     pushLog(`打开 Chrome 扩展目录失败：${String(err)}`);
+  }
+}
+
+export async function prepareBotBrowser(): Promise<string> {
+  try {
+    pushLog("正在下载并准备独立 Chrome for Testing，请稍候…");
+    const ready = await invoke<{ version: string }>("prepare_bot_browser");
+    const message = `独立浏览器已就绪：Chrome for Testing ${ready.version}。`;
+    pushLog(message);
+    return message;
+  } catch (err) {
+    const message = `准备独立浏览器失败：${String(err)}`;
+    pushLog(message);
+    return message;
+  }
+}
+
+export async function openBotBrowser(): Promise<string> {
+  try {
+    await invoke("open_bot_browser");
+    const message = "已请求在独立浏览器打开 Profile 编辑器；请填写资料并保存。";
+    pushLog(message);
+    return message;
+  } catch (err) {
+    const message = `打开 Profile 编辑器失败：${String(err)}`;
+    pushLog(message);
+    return message;
+  }
+}
+
+export async function copyBridgePairingCode(): Promise<string> {
+  try {
+    const code = await invoke<string>("get_bridge_pairing_code");
+    await navigator.clipboard.writeText(code);
+    const message = "已复制扩展连接码，请粘贴到 Chrome 扩展的结账资料设置中。";
+    pushLog(message);
+    return message;
+  } catch (err) {
+    const message = `复制扩展连接码失败：${String(err)}`;
+    pushLog(message);
+    return message;
+  }
+}
+
+export async function copyPaymentLink(url: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(url);
+    pushLog("已复制支付宝付款链接。");
+  } catch (err) {
+    pushLog(`复制付款链接失败：${String(err)}`);
   }
 }
 

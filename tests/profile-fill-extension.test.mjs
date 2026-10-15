@@ -18,6 +18,12 @@ function input({ name, label = '', value = '', type = 'text', parent = null }) {
   };
 }
 
+function select({ name, label = '', value = '', parent = null, options = [] }) {
+  return {
+    ...input({ name, label, value, parent }), tagName: 'SELECT', type: 'select-one', options,
+  };
+}
+
 function section(className) {
   return {
     id: '', className, children: [], parentElement: null,
@@ -25,11 +31,13 @@ function section(className) {
   };
 }
 
-async function run(fields, saved, pathname = '/shop/checkout') {
+async function run(fields, saved, pathname = '/shop/checkout', activeTask = true) {
   let changed;
   let observer;
+  const listeners = new Map();
+  const attributes = new Map();
   const document = {
-    documentElement: {},
+    documentElement: { setAttribute(key, value) { attributes.set(key, value); } },
     querySelectorAll() { return fields; },
     getElementById() { return null; },
   };
@@ -38,6 +46,7 @@ async function run(fields, saved, pathname = '/shop/checkout') {
     set(value) { this.value = value; },
   });
   const chrome = {
+    runtime: { async sendMessage(message) { return message.type === 'apw-active-task' && activeTask; } },
     storage: {
       local: { async get() { return { apwCheckoutProfile: saved }; } },
       onChanged: { addListener(fn) { changed = fn; } },
@@ -45,14 +54,15 @@ async function run(fields, saved, pathname = '/shop/checkout') {
   };
   vm.runInNewContext(script, {
     chrome, document, location: { pathname },
-    window: { addEventListener() {} },
+    window: { addEventListener(type, listener) { listeners.set(type, listener); } },
     HTMLInputElement: InputElement, HTMLTextAreaElement: class {},
+    HTMLSelectElement: class {},
     Event: class { constructor(type) { this.type = type; } },
     MutationObserver: class { constructor(callback) { observer = callback; } observe() {} },
     setTimeout(callback) { callback(); },
   });
   await new Promise(setImmediate);
-  return { changed, observer };
+  return { changed, observer, attributes, requestFill() { return listeners.get('apw-request-profile-fill')?.(); } };
 }
 
 const profile = {
@@ -71,7 +81,7 @@ test('fills distinct pickup and delivery contacts without touching billing or ex
   const deliveryAddress = input({ name: 'addressLine1', label: '详细地址', parent: delivery });
   const billingName = input({ name: 'firstName', label: '名', parent: billing });
   const card = input({ name: 'payment.cardNumber', label: '银行卡号', parent: delivery });
-  await run([pickupName, pickupPhone, deliveryName, deliveryAddress, billingName, card], profile);
+  const runtime = await run([pickupName, pickupPhone, deliveryName, deliveryAddress, billingName, card], profile);
   assert.equal(pickupName.value, '小明');
   assert.equal(pickupPhone.value, '用户已经填写');
   assert.equal(deliveryName.value, '李');
@@ -79,6 +89,7 @@ test('fills distinct pickup and delivery contacts without touching billing or ex
   assert.equal(billingName.value, '');
   assert.equal(card.value, '');
   assert.deepEqual(deliveryAddress.events, ['input', 'change']);
+  assert.equal(runtime.attributes.get('data-apw-profile-fill-ready'), '1');
 });
 
 test('only runs in checkout, respects disable switch, and fills later form steps', async () => {
@@ -94,5 +105,44 @@ test('only runs in checkout, respects disable switch, and fills later form steps
   const later = input({ name: 'postalCode', parent: delivery });
   fields.push(later);
   runtime.observer();
+  await new Promise(setImmediate);
   assert.equal(later.value, '100000');
+  const latest = input({ name: 'lastName', parent: delivery });
+  fields.push(latest);
+  await runtime.requestFill();
+  assert.equal(latest.value, '李');
+});
+
+test('inactive checkout task never inserts saved contact details', async () => {
+  const pickup = section('pickup-contact');
+  const name = input({ name: 'firstName', label: '名', parent: pickup });
+  const runtime = await run([name], profile, '/shop/checkout', false);
+  assert.equal(name.value, '');
+  assert.equal(runtime.attributes.get('data-apw-profile-fill-ready'), undefined);
+  await runtime.requestFill();
+  assert.equal(name.value, '');
+});
+
+test('selects only one exact delivery option and preserves existing or ambiguous choices', async () => {
+  const delivery = section('shipping-address');
+  const province = select({ name: 'province', parent: delivery, options: [
+    { value: '', textContent: '请选择' },
+    { value: 'BJ', textContent: '北京市' },
+    { value: 'SH', textContent: '上海市' },
+  ] });
+  const ambiguous = select({ name: 'city', parent: delivery, options: [
+    { value: 'A', textContent: '朝阳区' },
+    { value: 'B', textContent: '朝阳区' },
+  ] });
+  const existing = select({ name: 'district', parent: delivery, value: 'PUDONG', options: [
+    { value: 'PUDONG', textContent: '浦东新区' },
+    { value: 'CHAoyang', textContent: '朝阳区' },
+  ] });
+  await run([province, ambiguous, existing], {
+    ...profile, delivery: { ...profile.delivery, state: '北京市', city: '朝阳区', district: '朝阳区' },
+  });
+  assert.equal(province.value, 'BJ');
+  assert.deepEqual(province.events, ['input', 'change']);
+  assert.equal(ambiguous.value, '');
+  assert.equal(existing.value, 'PUDONG');
 });
