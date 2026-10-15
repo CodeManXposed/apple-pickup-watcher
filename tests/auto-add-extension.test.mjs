@@ -20,7 +20,7 @@ function control({ disabled = false, shown = true, checked = false } = {}) {
 function page({ hash = `#apw-auto-add=MJYE4CH%2FA&apw-store=R683&apw-task=${taskId}`,
   search = '', initialIntent = null, title = '', formPart = 'MJYE4CH/A',
   add = control({ disabled: true }), trade = control({ shown: false }),
-  care = control({ disabled: true }), capacity = control() } = {}) {
+  care = control({ disabled: true }), capacity = control(), taskActive = true } = {}) {
   const nodes = new Map();
   const storage = new Map(initialIntent ? [['apwAutoAddIntent', JSON.stringify(initialIntent)]] : []);
   const location = {
@@ -54,14 +54,21 @@ function page({ hash = `#apw-auto-add=MJYE4CH%2FA&apw-store=R683&apw-task=${task
   const window = {};
   window.top = window;
   let interval;
+  let taskChecks = 0;
+  const chrome = { runtime: { async sendMessage(message) {
+    if (message.type !== 'apw-cart-active') return null;
+    taskChecks++;
+    return typeof taskActive === 'function' ? taskActive() : taskActive;
+  } } };
   vm.runInNewContext(script, {
-    window, location, history, document, sessionStorage, URLSearchParams, URL, Date,
+    window, location, history, document, sessionStorage, chrome, URLSearchParams, URL, Date,
     setInterval(fn) { interval = fn; return 1; }, clearInterval() { interval = null; },
   });
-  return { location, history, storage, nodes, add, trade, care, capacity, tick() { interval?.(); } };
+  return { location, history, storage, nodes, add, trade, care, capacity,
+    tick() { interval?.(); }, settle: () => new Promise(setImmediate), taskChecks: () => taskChecks };
 }
 
-test('matching iPhone SKU chooses required options, clicks official add once, then verifies attach URL', () => {
+test('matching iPhone SKU chooses required options, clicks official add once, then verifies attach URL', async () => {
   const p = page();
   assert.equal(p.history.replaced, '/shop/buy-iphone/iphone-18-pro/mjye4ch/a');
   assert.equal(p.capacity.clicks, 1);
@@ -75,6 +82,7 @@ test('matching iPhone SKU chooses required options, clicks official add once, th
   p.care.checked = true;
   p.add.disabled = false;
   p.tick();
+  await p.settle();
   p.tick();
   assert.equal(p.add.clicks, 1);
   assert.equal(p.location.assigned, undefined);
@@ -86,11 +94,12 @@ test('matching iPhone SKU chooses required options, clicks official add once, th
   assert.equal(p.storage.size, 0);
 });
 
-test('pickup area survives product to bag navigation', () => {
+test('pickup area survives product to bag navigation', async () => {
   const hash = `#apw-auto-add=MJYE4CH%2FA&apw-store=R683&apw-task=${taskId}` +
     '&apw-product=iPhone+18+Pro+256GB+%E9%BB%91%E8%89%B2+%26+%E8%93%9D%E8%89%B2+%2B+50%25' +
     '&apw-province=%E4%B8%8A%E6%B5%B7&apw-city=%E4%B8%8A%E6%B5%B7&apw-district=%E6%99%AE%E9%99%80%E5%8C%BA';
   const p = page({ hash, add: control() });
+  await p.settle();
   p.location.pathname = '/shop/buy-iphone/iphone-18-pro';
   p.location.search = '?product=mjye4ch/a&step=attach';
   p.tick();
@@ -112,13 +121,27 @@ test('invalid marker and mismatched SKU never click add', () => {
   assert.equal(mismatch.add.clicks, 0);
 });
 
-test('mismatched attach product never starts checkout', () => {
+test('mismatched attach product never starts checkout', async () => {
   const p = page({ add: control() });
+  await p.settle();
   assert.equal(p.add.clicks, 1);
   p.location.pathname = '/shop/buy-iphone/iphone-18-pro';
   p.location.search = '?product=otherch/a&step=attach';
   p.tick();
   assert.equal(p.location.assigned, undefined);
+});
+
+test('stopped desktop task never clicks add, but a task becoming active can continue', async () => {
+  let active = false;
+  const p = page({ add: control(), taskActive: () => active });
+  await p.settle();
+  assert.equal(p.add.clicks, 0);
+  assert.equal(p.storage.has('apwAutoAddIntent'), true);
+  active = true;
+  p.tick();
+  await p.settle();
+  assert.equal(p.add.clicks, 1);
+  assert.equal(p.taskChecks(), 2);
 });
 
 test('Apple add error page stops the cart flow and reports the active task', async () => {

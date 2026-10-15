@@ -17,7 +17,7 @@
     const province = params.get('apw-province');
     const city = params.get('apw-city');
     const district = params.get('apw-district');
-    if (!PART.test(part) || !STORE.test(storeNumber) || (taskId && !TASK.test(taskId))) return;
+    if (!PART.test(part) || !STORE.test(storeNumber) || !TASK.test(taskId || '')) return;
     intent = { part, storeNumber, taskId, productName, province, city, district, phase: 'choosing', startedAt: Date.now() };
     sessionStorage.setItem(KEY, JSON.stringify(intent));
     // 返回商品页或刷新时不能再次启动一次加车。
@@ -25,7 +25,7 @@
   } else {
     try { intent = JSON.parse(sessionStorage.getItem(KEY) || 'null'); } catch { /* 忽略无效数据 */ }
   }
-  if (!intent || !PART.test(intent.part) || !STORE.test(intent.storeNumber) ||
+  if (!intent || !PART.test(intent.part) || !STORE.test(intent.storeNumber) || !TASK.test(intent.taskId || '') ||
       Date.now() - intent.startedAt > 60000) {
     sessionStorage.removeItem(KEY);
     return;
@@ -76,6 +76,8 @@
     return element && !element.disabled && element.getAttribute('aria-disabled') !== 'true' &&
       element.getClientRects().length > 0;
   }
+
+  let checkingTask = false;
 
   function tick() {
     if (Date.now() - intent.startedAt > 60000) {
@@ -144,11 +146,25 @@
       return;
     }
 
-    intent.phase = 'submitting';
-    intent.submittedAt = Date.now();
-    sessionStorage.setItem(KEY, JSON.stringify(intent));
-    notice(`正在将 ${intent.part} 加入购物袋…`);
-    add.click();
+    if (checkingTask) return;
+    checkingTask = true;
+    chrome.runtime.sendMessage({
+      type: 'apw-cart-active', partNumber: intent.part,
+      storeNumber: intent.storeNumber, taskId: intent.taskId,
+    }).then((active) => {
+      if (!active) {
+        notice('正在等待桌面应用确认加车任务；若已停止监控，本页不会加车。');
+        return;
+      }
+      if (intent.phase !== 'choosing' || !visible(add) || add.isConnected === false) return;
+      intent.phase = 'submitting';
+      intent.submittedAt = Date.now();
+      sessionStorage.setItem(KEY, JSON.stringify(intent));
+      notice(`正在将 ${intent.part} 加入购物袋…`);
+      add.click();
+    }).catch(() => {
+      notice('暂时无法确认桌面加车任务，正在等待连接恢复。');
+    }).finally(() => { checkingTask = false; });
   }
 
   notice(`正在配置 ${intent.part}…`);

@@ -95,6 +95,18 @@ test('checkout cannot begin when the desktop task is stale or pairing is missing
   assert.equal(unpaired.requests.length, 0);
 });
 
+test('product page checks the active desktop task before its cart button can be clicked', async () => {
+  const product = 'https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro/MJYE4CH/A';
+  const message = { type: 'apw-cart-active', partNumber: 'MJYE4CH/A', storeNumber: 'R683', taskId };
+  const active = background();
+  assert.equal(await active.send(message, product), true);
+  assert.equal(active.requests.filter(({ url }) => url.endsWith('/task-check')).length, 1);
+  assert.equal(await active.send(message, apple), false);
+  assert.equal(await active.send({ ...message, taskId: 'invalid' }, product), false);
+  const stopped = background({ taskActive: false });
+  assert.equal(await stopped.send(message, product), false);
+});
+
 test('each checkout phase requires the current desktop task before acting', async () => {
   const app = background();
   await app.send({ type: 'apw-begin-checkout', storeNumber: 'R683', partNumber: 'MJYE4CH/A', taskId }, apple);

@@ -201,6 +201,14 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if (message?.type === 'apw-cart-failed') {
       return forwardCartFailure(message, sender);
     }
+    if (message?.type === 'apw-cart-active' && applePage(sender.url)) {
+      const path = new URL(sender.url).pathname;
+      if (!(/\/shop\/pdpAddToBag\//.test(path) || /\/shop\/buy-[^/]+\//.test(path)) ||
+          !/^[A-Z0-9]{4,20}\/[A-Z]$/.test(message.partNumber || '') ||
+          !/^[A-Z0-9]{2,10}$/.test(message.storeNumber || '') ||
+          !/^[a-f0-9]{32}$/.test(message.taskId || '')) return false;
+      return activeTask(sender, message);
+    }
     const flow = await flowFor(tabId);
     if (message?.type === 'apw-get-checkout') return flow;
     if (message?.type === 'apw-active-task') {
