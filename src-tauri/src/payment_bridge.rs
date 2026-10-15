@@ -1145,6 +1145,75 @@ mod tests {
         assert_eq!(saved.latest.unwrap().url, "https://qr.alipay.com/fixture");
     }
 
+    #[tokio::test]
+    #[ignore = "requires APW_SMOKE_PYTHON and APW_CHROME_PATH; uses a disposable Chrome profile and local fixtures"]
+    async fn chrome_extension_completes_checkout_through_real_payment_bridge() {
+        let python = std::env::var("APW_SMOKE_PYTHON").expect("set APW_SMOKE_PYTHON");
+        let chrome = std::env::var("APW_CHROME_PATH").expect("set APW_CHROME_PATH");
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("checkout-session.v1.json");
+        let mut bridge = PaymentBridge::disabled();
+        bridge.token = Some("a".repeat(32));
+        bridge.session_path = Some(path.clone());
+        let task = bridge.start_task("MJYE4CH/A", "R683").unwrap();
+        bridge
+            .advance_task("launched", "MJYE4CH/A", "R683", &task.task_id)
+            .unwrap();
+        let task_id = task.task_id;
+        app.manage(bridge);
+        let apple = AppleClient::new(ClientConfig::default()).unwrap();
+        let (watcher, _events, _engine) = Watcher::new(apple.clone(), WatcherConfig::default());
+        app.manage(AppState {
+            watcher,
+            client: apple,
+            catalog: Catalog::new(),
+            http: reqwest::Client::new(),
+            browser_install: tokio::sync::Mutex::new(()),
+            settings: std::sync::RwLock::new(Settings::default()),
+            store: None,
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = app.handle().clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let app = handle.clone();
+                tokio::spawn(async move { handle_connection(app, socket).await });
+            }
+        });
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/browser-flow-smoke.py");
+        let output = tokio::task::spawn_blocking(move || {
+            std::process::Command::new(python)
+                .arg(script)
+                .env("APW_EXTERNAL_BRIDGE_PORT", port.to_string())
+                .env("APW_TASK_ID", task_id)
+                .env("APW_CHROME_PATH", chrome)
+                .output()
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        server.abort();
+        assert!(
+            output.status.success(),
+            "Chrome fixture failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bridge = app.state::<PaymentBridge>();
+        assert_eq!(bridge.status().unwrap().stage, "paymentLink");
+        let link = bridge.latest().unwrap();
+        assert_eq!(link.kind, "qr");
+        assert_eq!(link.url, "https://qr.alipay.com/apw-local-test-only");
+        let saved = read_session(&path, now()).unwrap();
+        assert_eq!(
+            saved.latest.unwrap().url,
+            "https://qr.alipay.com/apw-local-test-only"
+        );
+    }
+
     async fn read_webhook_request(socket: &mut TcpStream) -> Vec<u8> {
         let mut bytes = Vec::new();
         let mut chunk = [0u8; 2048];

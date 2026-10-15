@@ -4,6 +4,8 @@ Requires Chrome for Testing and ``pip install websockets==14.2``. Set
 APW_CHROME_PATH if Chrome is not in PATH or the app's local browser directory.
 The script copies and adapts the extension into a temporary directory; it never
 changes the user's Chrome profile or contacts Apple, Alipay, or Discord.
+Set APW_EXTERNAL_BRIDGE_PORT and APW_TASK_ID to connect the fixture flow to a
+real local Rust payment bridge instead of the script's mock bridge.
 """
 
 import asyncio
@@ -24,7 +26,7 @@ import websockets
 
 ROOT = Path(__file__).resolve().parents[1]
 TOKEN = "a" * 32
-TASK = "b" * 32
+TASK = os.environ.get("APW_TASK_ID", "b" * 32)
 PART = "MJYE4CH/A"
 STORE = "R683"
 QR = "https://qr.alipay.com/apw-local-test-only"
@@ -282,7 +284,7 @@ async def wait_until(predicate, label, timeout=20):
     raise TimeoutError(f"timed out waiting for {label}; last bridge calls: {BRIDGE_REQUESTS[-10:]}")
 
 
-async def run_browser(page_port, extension, profile, navigation_mode, payment_mode):
+async def run_browser(page_port, extension, profile, navigation_mode, payment_mode, external_bridge=False):
     command = [
         str(chrome_binary()), "--headless=new", "--remote-debugging-address=127.0.0.1",
         "--remote-debugging-port=0", "--enable-unsafe-extension-debugging",
@@ -354,6 +356,38 @@ async def run_browser(page_port, extension, profile, navigation_mode, payment_mo
             await browser.call("Page.navigate", {
                 "url": f"http://127.0.0.1:{page_port}/shop/pdpAddToBag/{PART}#{fragment}",
             })
+            if external_bridge:
+                await wait_until(lambda: "/alipay" in PAGE_HITS, "fixture Alipay page")
+                await wait_until(
+                    lambda: "/shop/checkout" in PAGE_HITS,
+                    "fixture checkout page",
+                )
+                await wait_until(
+                    lambda: "/shop/bag" in PAGE_HITS,
+                    "fixture bag page",
+                )
+                await wait_until(
+                    lambda: "/shop/signIn" in PAGE_HITS,
+                    "fixture guest checkout page",
+                )
+                for _ in range(100):
+                    notice = await browser.evaluate(
+                        "document.querySelector('#apw-alipay-notice')?.textContent || ''"
+                    )
+                    if "已将支付宝二维码链接发送到桌面应用" in (notice or ""):
+                        break
+                    await asyncio.sleep(0.1)
+                else:
+                    raise TimeoutError("real desktop bridge did not acknowledge the QR link")
+                contact = await browser.evaluate(
+                    "JSON.parse(sessionStorage.getItem('apwSmokeResult'))"
+                )
+                assert contact == {
+                    "name": "Test Person", "phone": "13800138000",
+                    "email": "test@example.invalid", "alipay": True,
+                }, contact
+                print("Chrome fixture passed with the real Rust payment bridge")
+                return
             if navigation_mode == "stopped cart":
                 await wait_until(
                     lambda: sum(path == "/task-check" for path, _ in BRIDGE_REQUESTS) >= 2,
@@ -438,6 +472,22 @@ async def run_browser(page_port, extension, profile, navigation_mode, payment_mo
 async def main():
     global LATEST_PAYMENT, TEST_PAYMENT_MODE, TEST_DELAY_TASK_CHECK, TEST_DELAY_CART_CHECK, TEST_STOP_CART
     pages = ThreadingHTTPServer(("127.0.0.1", 0), PageHandler)
+    external_bridge_port = os.environ.get("APW_EXTERNAL_BRIDGE_PORT")
+    if external_bridge_port:
+        threading.Thread(target=pages.serve_forever, daemon=True).start()
+        try:
+            with tempfile.TemporaryDirectory(prefix="apw-browser-real-bridge-") as directory:
+                base = Path(directory)
+                extension = base / "extension"
+                test_extension_copy(extension, int(external_bridge_port))
+                await run_browser(
+                    pages.server_address[1], extension, base / "profile",
+                    "same tab", "qr", external_bridge=True,
+                )
+        finally:
+            pages.shutdown()
+            pages.server_close()
+        return
     bridge = ThreadingHTTPServer(("127.0.0.1", 0), BridgeHandler)
     threading.Thread(target=pages.serve_forever, daemon=True).start()
     threading.Thread(target=bridge.serve_forever, daemon=True).start()
