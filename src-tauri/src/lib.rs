@@ -839,8 +839,12 @@ mod retry_target_tests {
 async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Event>) {
     let (automation, pending_automation) = tokio::sync::mpsc::unbounded_channel();
     let automation_app = app.clone();
-    let automation_task =
-        tauri::async_runtime::spawn(run_automation(automation_app, pending_automation));
+    let live_run = std::sync::Arc::new(AtomicBool::new(false));
+    let automation_task = tauri::async_runtime::spawn(run_automation(
+        automation_app,
+        pending_automation,
+        live_run.clone(),
+    ));
 
     let (notifications, pending) = notification_queue::channel();
     let notification_app = app.clone();
@@ -855,6 +859,9 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
 
     let mut automation_available = true;
     while let Some(event) = events.recv().await {
+        if let Event::RunStateChanged { running } = &event {
+            live_run.store(*running, Ordering::SeqCst);
+        }
         let _ = app.emit(EVENT_CHANNEL, &event);
         let notification = if let Event::InStock { state } = &event {
             let target = &state.target;
@@ -898,7 +905,11 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
 }
 
 /// 自动任务按库存事件顺序执行，保留单次加车及有限重试语义。
-async fn run_automation(app: AppHandle, mut events: tokio::sync::mpsc::UnboundedReceiver<Event>) {
+async fn run_automation(
+    app: AppHandle,
+    mut events: tokio::sync::mpsc::UnboundedReceiver<Event>,
+    live_run: std::sync::Arc<AtomicBool>,
+) {
     let mut auto_open_bag = AutoOpenBag::default();
     let mut watch_running = false;
     let mut auto_add_enabled = app.state::<AppState>().settings_snapshot().auto_add_to_bag;
@@ -912,7 +923,7 @@ async fn run_automation(app: AppHandle, mut events: tokio::sync::mpsc::Unbounded
             event = events.recv() => event,
             _ = task_tick.tick() => {
                 let settings = app.state::<AppState>().settings_snapshot();
-                if !watch_running || !settings.auto_add_to_bag {
+                if !watch_running || !live_run.load(Ordering::SeqCst) || !settings.auto_add_to_bag {
                     if let Some(cancel) = &release_cancel {
                         cancel.store(true, Ordering::SeqCst);
                     }
@@ -1001,7 +1012,7 @@ async fn run_automation(app: AppHandle, mut events: tokio::sync::mpsc::Unbounded
                 let _ = app.emit(NOTICE_CHANNEL, "零件号无效，已跳过该目标的自动加车");
             }
 
-            if !watch_running {
+            if !watch_running || !live_run.load(Ordering::SeqCst) {
                 continue;
             }
 
@@ -1065,6 +1076,7 @@ async fn run_automation(app: AppHandle, mut events: tokio::sync::mpsc::Unbounded
             }
             let ready_for_attempt = auto_open_bag.should_try_on_cycle();
             if !watch_running
+                || !live_run.load(Ordering::SeqCst)
                 || !settings.auto_add_to_bag
                 || !ready_for_attempt
                 || pending_retry.is_some()
