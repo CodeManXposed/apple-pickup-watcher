@@ -11,7 +11,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use crate::browser_bot;
 use crate::direct_cart::{self, AddOutcome, DirectCart};
 use crate::payment_bridge::{self, PaymentBridge, PaymentLink};
-use crate::{NOTICE_CHANNEL, browser_task_url};
+use crate::{NOTICE_CHANNEL, browser_task_url, notify_apple_action_needed};
 
 pub(crate) const PREWARM_MS: u64 = 10 * 60 * 1_000;
 pub(crate) const WAIT_LIMIT_MS: u64 = 4 * 60 * 60 * 1_000;
@@ -473,6 +473,7 @@ pub(crate) async fn run(
                     Ok(DirectReleaseResult::BrowserFallback(message)) => {
                         browser_fallback = true;
                         let _ = app.emit(NOTICE_CHANNEL, message);
+                        notify_apple_action_needed(&app);
                         Ok(false)
                     }
                     Ok(DirectReleaseResult::NoRetry(err)) => {

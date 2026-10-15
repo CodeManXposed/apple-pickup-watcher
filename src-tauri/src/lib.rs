@@ -682,6 +682,19 @@ fn emit_system_notification(app: &AppHandle, n: &Notification) {
     }
 }
 
+fn notify_apple_action_needed(app: &AppHandle) {
+    use tauri_plugin_notification::NotificationExt;
+    if let Err(err) = app
+        .notification()
+        .builder()
+        .title("Apple 任务等待操作")
+        .body("请查看独立浏览器的商品页；若出现验证或等待页，处理后任务会继续。")
+        .show()
+    {
+        let _ = app.emit(NOTICE_CHANNEL, format!("系统通知发送失败：{err}"));
+    }
+}
+
 async fn open_task_browser(app: &AppHandle, url: reqwest::Url) -> Result<(), String> {
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || browser_bot::open_task(&app, url.as_str()))
@@ -820,6 +833,7 @@ async fn open_auto_add(
                                         let _ = app.emit(NOTICE_CHANNEL, format!(
                                             "{reason}；已切换到独立浏览器加车。若 Apple 要求验证，请在商品页完成，放行后会继续。"
                                         ));
+                                        notify_apple_action_needed(app);
                                         Ok(())
                                     }
                                     Err(err) => Err(format!(
