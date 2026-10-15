@@ -112,6 +112,7 @@ async fn direct_release_add(
     task_id: &str,
     tab_id: &str,
     checkout_area: Option<&(String, String, String)>,
+    cancelled: &AtomicBool,
 ) -> Result<DirectReleaseResult, String> {
     let region = region_by_locale(&target.locale).ok_or("发售任务地区无效")?;
     let session = DirectCart::new(region, target, Some(plan))?;
@@ -138,8 +139,29 @@ async fn direct_release_add(
             );
         }
     }
-    let cookies = match session.add().await? {
+    let bridge = app.state::<PaymentBridge>();
+    let is_live = || !cancelled.load(Ordering::SeqCst) && bridge.is_live_cart_task_id(task_id);
+    let outcome = session.add(is_live).await?;
+    if !is_live() {
+        let detail = match outcome {
+            AddOutcome::Confirmed(_) => {
+                "Apple 已确认直连加车，但发售任务已暂停；请核对购物袋。本轮不会自动结账。"
+                    .to_owned()
+            }
+            AddOutcome::Uncertain { reason, .. } => {
+                format!("{reason}；发售任务已暂停，请核对购物袋。本轮不会自动结账。")
+            }
+            _ => "发售任务已暂停；本轮不会继续直连加车或自动结账。".to_owned(),
+        };
+        return Ok(DirectReleaseResult::NoRetry(detail));
+    }
+    let cookies = match outcome {
         AddOutcome::Confirmed(cookies) => cookies,
+        AddOutcome::Cancelled => {
+            return Ok(DirectReleaseResult::NoRetry(
+                "发售任务已暂停；本轮不会继续直连加车或自动结账。".into(),
+            ));
+        }
         AddOutcome::Stop(reason) => return Ok(DirectReleaseResult::NoRetry(reason)),
         AddOutcome::Uncertain { reason, cookies } => {
             let inspection = if cookies.is_empty() {
@@ -358,6 +380,7 @@ pub(crate) async fn run(
                     &task_id,
                     &tab_id,
                     checkout_area.as_ref(),
+                    &cancelled,
                 )
                 .await
                 {

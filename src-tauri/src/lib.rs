@@ -264,7 +264,11 @@ async fn save_settings(
     // 无论监控是否已运行，开启自动加车前都做预检。
     // 预检放在任何引擎或配置改动之前，失败时保持旧设置。
     if next.auto_add_to_bag && !state.settings_snapshot().auto_add_to_bag {
-        preflight_checkout(app).await?;
+        preflight_checkout(app.clone()).await?;
+    }
+    let auto_add_disabled = state.settings_snapshot().auto_add_to_bag && !next.auto_add_to_bag;
+    if auto_add_disabled {
+        pause_checkout_task(&app);
     }
 
     // 设置里的目标列表和查询间隔要同步给引擎，否则改完设置监控还按旧的跑。
@@ -281,6 +285,18 @@ async fn save_settings(
 
     state.put_settings(next.clone())?;
     Ok(next)
+}
+
+fn pause_checkout_task(app: &AppHandle) {
+    match app.state::<PaymentBridge>().pause_active_task() {
+        Ok(Some(status)) => {
+            let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
+        }
+        Ok(None) => {}
+        Err(err) => {
+            let _ = app.emit(NOTICE_CHANNEL, format!("暂停自动结账任务失败：{err}"));
+        }
+    }
 }
 
 fn validate_api_task_urls(settings: &Settings) -> Result<(), String> {
@@ -409,7 +425,8 @@ async fn preflight_checkout(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn stop_watching(state: tauri::State<'_, AppState>) -> Result<(), String> {
+async fn stop_watching(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    pause_checkout_task(&app);
     state.watcher.stop().await;
     Ok(())
 }
@@ -648,8 +665,23 @@ async fn open_auto_add(
                                 let _ = app.emit(NOTICE_CHANNEL, format!("读取独立浏览器 Apple 会话中断：{err}；本轮使用新 HTTP 会话"));
                             }
                         }
-                        let cookies = match session.add().await? {
+                        let outcome = session
+                            .add(|| bridge.is_live_cart_task_id(&task_id))
+                            .await?;
+                        if !bridge.is_live_cart_task_id(&task_id) {
+                            api_stop_retries = true;
+                            return Err(match outcome {
+                                direct_cart::AddOutcome::Confirmed(_) => "Apple 已确认直连加车，但任务已停止；请在独立浏览器核对购物袋。本轮不会自动结账。".to_owned(),
+                                direct_cart::AddOutcome::Uncertain { reason, .. } => format!("{reason}；任务已停止，请核对购物袋。本轮不会再次加车或自动结账。"),
+                                _ => "任务已停止；本轮不会继续直连加车或自动结账。".to_owned(),
+                            });
+                        }
+                        let cookies = match outcome {
                             direct_cart::AddOutcome::Confirmed(cookies) => cookies,
+                            direct_cart::AddOutcome::Cancelled => {
+                                api_stop_retries = true;
+                                return Err("任务已停止；本轮不会继续直连加车或自动结账。".into());
+                            }
                             direct_cart::AddOutcome::Stop(reason) => {
                                 api_stop_retries = true;
                                 let inspection =
@@ -861,6 +893,9 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
     while let Some(event) = events.recv().await {
         if let Event::RunStateChanged { running } = &event {
             live_run.store(*running, Ordering::SeqCst);
+            if !running {
+                pause_checkout_task(&app);
+            }
         }
         let _ = app.emit(EVENT_CHANNEL, &event);
         let notification = if let Event::InStock { state } = &event {

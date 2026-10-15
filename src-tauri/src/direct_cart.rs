@@ -15,6 +15,7 @@ use crate::browser_bot::SessionCookie;
 
 pub(crate) enum AddOutcome {
     Confirmed(Vec<SessionCookie>),
+    Cancelled,
     /// 风控阻断或响应不足以确认购物袋状态；本轮停止以免重复加车。
     Stop(String),
     /// 请求可能已被 Apple 执行；交出同一会话供人工核对，绝不自动重试或结账。
@@ -264,7 +265,13 @@ impl DirectCart {
         Err("Apple 商品页跳转次数过多".into())
     }
 
-    pub(crate) async fn add(&self) -> Result<AddOutcome, String> {
+    pub(crate) async fn add(
+        &self,
+        is_live: impl Fn() -> bool + Send + Sync,
+    ) -> Result<AddOutcome, String> {
+        if !is_live() {
+            return Ok(AddOutcome::Cancelled);
+        }
         let page = self
             .get_following(self.product.clone(), None, RequestKind::Product)
             .await?;
@@ -295,6 +302,9 @@ impl DirectCart {
             self.base.as_str().trim_end_matches('/')
         ))
         .map_err(|_| "Apple 加车信标地址无效")?;
+        if !is_live() {
+            return Ok(AddOutcome::Cancelled);
+        }
         let beacon_response = self
             .get_following(beacon, Some(&canonical), RequestKind::Beacon)
             .await?;
@@ -309,6 +319,9 @@ impl DirectCart {
                 "Apple 未提供加车验证令牌；本轮不再直连重试".into(),
             ));
         };
+        if !is_live() {
+            return Ok(AddOutcome::Cancelled);
+        }
         let request = add_url(&canonical, &self.part, &token);
         // 此请求会修改购物袋。只要开始发送，网络断开、重定向失败或服务器错误
         // 都无法证明 Apple 没有完成加车；不能交给任务调度器再次提交。
@@ -544,6 +557,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stopped_task_does_not_start_an_http_cart_session() {
+        let cn = region_by_locale("zh_CN").unwrap();
+        let target = Target {
+            locale: "zh_CN".into(),
+            store_number: "R683".into(),
+            store_title: "测试门店".into(),
+            part_number: "MJYE4CH/A".into(),
+            product_name: "测试商品".into(),
+            companion_part: None,
+            pickup_location: None,
+        };
+        let session = DirectCart::new(cn, &target, None).unwrap();
+        assert!(matches!(
+            session.add(|| false).await.unwrap(),
+            AddOutcome::Cancelled
+        ));
+    }
+
+    #[tokio::test]
     #[ignore = "sends one real Apple add-to-bag request in a disposable HTTP session"]
     async fn live_direct_add_diagnostic() {
         let part = std::env::var("APW_LIVE_ADD_PART").expect("set APW_LIVE_ADD_PART to a SKU");
@@ -558,8 +590,9 @@ mod tests {
             pickup_location: None,
         };
         let session = DirectCart::new(cn, &target, None).unwrap();
-        match session.add().await.unwrap() {
+        match session.add(|| true).await.unwrap() {
             AddOutcome::Confirmed(_) => println!("Apple confirmed the add URL"),
+            AddOutcome::Cancelled => panic!("live diagnostic unexpectedly cancelled"),
             AddOutcome::Stop(reason) => panic!("Apple stopped before add: {reason}"),
             AddOutcome::Uncertain { reason, .. } => panic!("Apple did not confirm add: {reason}"),
         }

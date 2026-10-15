@@ -211,6 +211,23 @@ impl PaymentBridge {
         })
     }
 
+    pub fn is_live_cart_task_id(&self, task_id: &str) -> bool {
+        self.status().is_some_and(|status| {
+            status.task_id == task_id
+                && status.automation_active
+                && matches!(
+                    status.stage.as_str(),
+                    "starting" | "waitingRelease" | "waitingRoom" | "launched"
+                )
+                && self
+                    .live_task_id
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_deref()
+                    == Some(task_id)
+        })
+    }
+
     pub fn start_task(&self, part_number: &str, store_number: &str) -> Result<BotStatus, String> {
         let status = BotStatus {
             part_number: part_number.to_owned(),
@@ -231,6 +248,28 @@ impl PaymentBridge {
         *self.live_task_id.write().unwrap_or_else(|e| e.into_inner()) =
             Some(status.task_id.clone());
         Ok(status)
+    }
+
+    /// 停止监控或关闭自动任务后，旧商品页不能再凭原任务身份加车或结账。
+    /// 保留阶段与付款链接；已提交订单的支付宝页面仍可回传链接。
+    pub fn pause_active_task(&self) -> Result<Option<BotStatus>, String> {
+        let mut current = self.session.write().unwrap_or_else(|e| e.into_inner());
+        let Some(previous) = current.status.as_ref() else {
+            return Ok(None);
+        };
+        if !previous.automation_active {
+            return Ok(None);
+        }
+        let next = BotStatus {
+            updated_at: now(),
+            automation_active: false,
+            ..previous.clone()
+        };
+        let mut updated = current.clone();
+        updated.status = Some(next.clone());
+        self.commit(&mut current, updated)?;
+        *self.live_task_id.write().unwrap_or_else(|e| e.into_inner()) = None;
+        Ok(Some(next))
     }
 
     pub fn advance_task(
@@ -1205,6 +1244,56 @@ mod tests {
             task_id: third_id,
             ..second
         }));
+    }
+
+    #[test]
+    fn paused_monitor_disables_old_cart_and_checkout_actions() {
+        let bridge = PaymentBridge::disabled();
+        let task_id = bridge.start_task("MJYE4CH/A", "R683").unwrap().task_id;
+        let task = IncomingTask {
+            part_number: "MJYE4CH/A".into(),
+            store_number: "R683".into(),
+            task_id: task_id.clone(),
+        };
+        assert!(bridge.is_live_cart_task_id(&task_id));
+        bridge
+            .advance_task("launched", "MJYE4CH/A", "R683", &task_id)
+            .unwrap();
+        assert!(bridge.is_active_task(&task));
+        let paused = bridge.pause_active_task().unwrap().unwrap();
+        assert_eq!(paused.stage, "launched");
+        assert!(!paused.automation_active);
+        assert!(!bridge.is_active_task(&task));
+        assert!(!bridge.is_live_cart_task_id(&task_id));
+        assert!(bridge.pause_active_task().unwrap().is_none());
+        let next = bridge.start_task("MJYE4CH/A", "R683").unwrap();
+        assert_ne!(next.task_id, task_id);
+        assert!(!bridge.is_active_task(&task));
+    }
+
+    #[test]
+    fn pausing_after_order_submission_keeps_payment_link_handoff() {
+        let bridge = PaymentBridge::disabled();
+        let task_id = bridge.start_task("MJYE4CH/A", "R683").unwrap().task_id;
+        bridge
+            .advance_task("orderSubmitted", "MJYE4CH/A", "R683", &task_id)
+            .unwrap();
+        bridge.pause_active_task().unwrap();
+        let incoming = IncomingLink {
+            url: "https://qr.alipay.com/paused-order".into(),
+            kind: "qr".into(),
+            part_number: Some("MJYE4CH/A".into()),
+            store_number: Some("R683".into()),
+            task_id: Some(task_id.clone()),
+        };
+        let link = PaymentLink {
+            url: incoming.url.clone(),
+            kind: incoming.kind.clone(),
+            received_at: now(),
+            task_id,
+        };
+        assert!(bridge.record_current(&incoming, link).unwrap().unwrap().0);
+        assert_eq!(bridge.latest().unwrap().url, incoming.url);
     }
 
     #[test]
