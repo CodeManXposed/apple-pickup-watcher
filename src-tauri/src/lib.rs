@@ -21,7 +21,7 @@ use apw_core::watcher::{Event, TargetState, Watcher, WatcherConfig};
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, Runtime, WindowEvent};
 use tauri_plugin_updater::UpdaterExt;
 
 mod auto_open;
@@ -260,22 +260,25 @@ async fn save_settings(
     state.catalog.attach_companions(&mut next.targets);
     state.catalog.attach_locations(&mut next.targets);
     validate_api_task_urls(&next)?;
+    let previous = state.settings_snapshot();
 
     // 无论监控是否已运行，开启自动加车前都做预检。
     // 预检放在任何引擎或配置改动之前，失败时保持旧设置。
-    if next.auto_add_to_bag && !state.settings_snapshot().auto_add_to_bag {
+    if next.auto_add_to_bag && !previous.auto_add_to_bag {
         preflight_checkout(app.clone()).await?;
     }
-    let auto_add_disabled = state.settings_snapshot().auto_add_to_bag && !next.auto_add_to_bag;
+    let auto_add_disabled = previous.auto_add_to_bag && !next.auto_add_to_bag;
     if auto_add_disabled {
         pause_checkout_task(&app);
+    } else {
+        pause_removed_target(&app, &next.targets);
     }
 
     // 设置里的目标列表和查询间隔要同步给引擎，否则改完设置监控还按旧的跑。
     state.watcher.set_targets(next.targets.clone()).await;
     state.watcher.set_interval(next.interval()).await;
     // 代理变了就换线路，立即生效；地址解析不了就把错误报回界面，其余设置照存。
-    if next.proxies != state.settings_snapshot().proxies {
+    if next.proxies != previous.proxies {
         state
             .client
             .set_proxies(&next.proxies)
@@ -287,7 +290,7 @@ async fn save_settings(
     Ok(next)
 }
 
-fn pause_checkout_task(app: &AppHandle) {
+fn pause_checkout_task<R: Runtime>(app: &AppHandle<R>) {
     match app.state::<PaymentBridge>().pause_active_task() {
         Ok(Some(status)) => {
             let _ = app.emit(payment_bridge::STATUS_CHANNEL, status);
@@ -296,6 +299,23 @@ fn pause_checkout_task(app: &AppHandle) {
         Err(err) => {
             let _ = app.emit(NOTICE_CHANNEL, format!("暂停自动结账任务失败：{err}"));
         }
+    }
+}
+
+fn pause_removed_target<R: Runtime>(app: &AppHandle<R>, targets: &[Target]) {
+    let removed = app.state::<PaymentBridge>().status().is_some_and(|status| {
+        status.automation_active
+            && !targets.iter().any(|target| {
+                target.part_number == status.part_number
+                    && target.store_number == status.store_number
+            })
+    });
+    if removed {
+        pause_checkout_task(app);
+        let _ = app.emit(
+            NOTICE_CHANNEL,
+            "进行中的商品目标已移除，自动结账任务已暂停。",
+        );
     }
 }
 
@@ -358,6 +378,40 @@ mod api_task_url_tests {
     }
 }
 
+#[cfg(test)]
+mod task_removal_tests {
+    use super::{PaymentBridge, pause_removed_target};
+    use apw_core::model::Target;
+    use tauri::Manager;
+
+    #[test]
+    fn removing_the_active_target_revokes_its_checkout_task() {
+        let app = tauri::test::mock_app();
+        app.manage(PaymentBridge::disabled());
+        let bridge = app.state::<PaymentBridge>();
+        let active = Target {
+            locale: "zh_CN".into(),
+            store_number: "R683".into(),
+            store_title: "测试门店".into(),
+            part_number: "MJYE4CH/A".into(),
+            product_name: "测试商品".into(),
+            companion_part: None,
+            pickup_location: None,
+        };
+        let mut other = active.clone();
+        other.part_number = "OTHERCH/A".into();
+        let task = bridge
+            .start_task(&active.part_number, &active.store_number)
+            .unwrap();
+        pause_removed_target(app.handle(), &[other.clone(), active]);
+        assert!(bridge.is_live_cart_task_id(&task.task_id));
+
+        pause_removed_target(app.handle(), &[other]);
+        assert!(!bridge.is_live_cart_task_id(&task.task_id));
+        assert!(!bridge.status().unwrap().automation_active);
+    }
+}
+
 /// 用界面上的推送地址列表整体替换现有的。
 ///
 /// 每个地址是 Bark 还是飞书由 [`Settings::set_push_urls`] 按长相判断，界面不自己猜。
@@ -382,12 +436,14 @@ async fn get_snapshot(state: tauri::State<'_, AppState>) -> Result<Vec<TargetSta
 
 #[tauri::command]
 async fn set_targets(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
     targets: Vec<Target>,
 ) -> Result<Vec<TargetState>, String> {
     let mut targets = targets;
     state.catalog.attach_companions(&mut targets);
     state.catalog.attach_locations(&mut targets);
+    pause_removed_target(&app, &targets);
     state.watcher.set_targets(targets.clone()).await;
     let mut next = state.settings_snapshot();
     next.targets = targets;

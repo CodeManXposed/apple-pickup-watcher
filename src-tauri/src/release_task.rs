@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use apw_core::config::{AddMethod, Settings, TaskMode, TaskPlan};
 use apw_core::model::{Target, region_by_locale};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::browser_bot;
 use crate::direct_cart::{self, AddOutcome, DirectCart};
@@ -74,8 +74,14 @@ fn stage(app: &AppHandle, task: &Target, task_id: &str, next: &str) -> Result<()
     Ok(())
 }
 
-fn fail(app: &AppHandle, task_id: &str, reason: &str) {
+fn fail<R: Runtime>(app: &AppHandle<R>, task_id: &str, reason: &str) {
     let bridge = app.state::<PaymentBridge>();
+    if bridge
+        .status()
+        .is_some_and(|status| status.task_id == task_id && !status.automation_active)
+    {
+        return;
+    }
     for waiting in ["starting", "waitingRelease", "waitingRoom"] {
         match bridge.fail_if_stage(task_id, waiting) {
             Ok(Some(status)) => {
@@ -95,9 +101,62 @@ fn fail(app: &AppHandle, task_id: &str, reason: &str) {
     }
 }
 
-async fn wait_or_cancel(cancelled: &AtomicBool, duration: Duration) -> bool {
-    tokio::time::sleep(duration).await;
-    cancelled.load(Ordering::SeqCst)
+fn task_cancelled<R: Runtime>(app: &AppHandle<R>, task_id: &str, cancelled: &AtomicBool) -> bool {
+    cancelled.load(Ordering::SeqCst) || !app.state::<PaymentBridge>().is_live_cart_task_id(task_id)
+}
+
+async fn wait_or_cancel<R: Runtime>(
+    app: &AppHandle<R>,
+    task_id: &str,
+    cancelled: &AtomicBool,
+    duration: Duration,
+) -> bool {
+    let until = Instant::now() + duration;
+    loop {
+        if task_cancelled(app, task_id, cancelled) {
+            return true;
+        }
+        let remaining = until.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        tokio::time::sleep(remaining.min(Duration::from_secs(1))).await;
+    }
+}
+
+#[cfg(test)]
+mod task_cancellation_tests {
+    use super::{PaymentBridge, fail, wait_or_cancel};
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
+    use tauri::Manager;
+
+    #[tokio::test]
+    async fn waiting_release_stops_after_its_desktop_task_is_revoked() {
+        let app = tauri::test::mock_app();
+        app.manage(PaymentBridge::disabled());
+        let bridge = app.state::<PaymentBridge>();
+        let task = bridge.start_task("MJYE4CH/A", "R683").unwrap();
+        let cancelled = AtomicBool::new(false);
+        let started = Instant::now();
+        let revoke = async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            bridge.pause_active_task().unwrap();
+        };
+        let wait = wait_or_cancel(
+            app.handle(),
+            &task.task_id,
+            &cancelled,
+            Duration::from_secs(5),
+        );
+        let (_, stopped) = tokio::join!(revoke, wait);
+        assert!(stopped);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        fail(app.handle(), &task.task_id, "发售任务已暂停");
+        let status = bridge.status().unwrap();
+        assert_eq!(status.stage, "starting");
+        assert!(!status.automation_active);
+    }
 }
 
 enum DirectReleaseResult {
@@ -303,7 +362,7 @@ pub(crate) async fn run(
     let delay = Duration::from_millis(plan.retry_delay_ms);
     let mut tab_id = None;
     for attempt in 0..3 {
-        if cancelled.load(Ordering::SeqCst) {
+        if task_cancelled(&app, &task_id, &cancelled) {
             fail(&app, &task_id, "发售任务已暂停");
             return;
         }
@@ -325,7 +384,7 @@ pub(crate) async fn run(
                 return;
             }
             Err(_) => {
-                if wait_or_cancel(&cancelled, delay).await {
+                if wait_or_cancel(&app, &task_id, &cancelled, delay).await {
                     fail(&app, &task_id, "发售任务已暂停");
                     return;
                 }
@@ -344,7 +403,7 @@ pub(crate) async fn run(
 
     let at = plan.release_at_ms.unwrap_or_default();
     while now_ms() < at {
-        if wait_or_cancel(&cancelled, Duration::from_millis(1_000)).await {
+        if wait_or_cancel(&app, &task_id, &cancelled, Duration::from_millis(1_000)).await {
             fail(&app, &task_id, "发售任务已暂停");
             return;
         }
@@ -357,7 +416,7 @@ pub(crate) async fn run(
     let mut errors = 0;
     let mut last_missing_refresh: Option<Instant> = None;
     while now_ms() <= deadline {
-        if cancelled.load(Ordering::SeqCst) {
+        if task_cancelled(&app, &task_id, &cancelled) {
             fail(&app, &task_id, "发售任务已暂停");
             return;
         }
@@ -392,7 +451,7 @@ pub(crate) async fn run(
         }
         let result = match result {
             Ok(true) if plan.add_method == AddMethod::Api => {
-                if cancelled.load(Ordering::SeqCst) {
+                if task_cancelled(&app, &task_id, &cancelled) {
                     fail(&app, &task_id, "发售任务已暂停");
                     return;
                 }
@@ -458,7 +517,7 @@ pub(crate) async fn run(
                 }
             }
         }
-        if wait_or_cancel(&cancelled, delay).await {
+        if wait_or_cancel(&app, &task_id, &cancelled, delay).await {
             fail(&app, &task_id, "发售任务已暂停");
             return;
         }
