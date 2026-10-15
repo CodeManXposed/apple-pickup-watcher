@@ -513,8 +513,8 @@ mod tests {
         let session = DirectCart::new(cn, &target, None).unwrap();
         match session.add().await.unwrap() {
             AddOutcome::Confirmed(_) => println!("Apple confirmed the add URL"),
-            AddOutcome::Stop(reason) => println!("Apple stopped before add: {reason}"),
-            AddOutcome::Uncertain { reason, .. } => println!("Apple add is uncertain: {reason}"),
+            AddOutcome::Stop(reason) => panic!("Apple stopped before add: {reason}"),
+            AddOutcome::Uncertain { reason, .. } => panic!("Apple did not confirm add: {reason}"),
         }
     }
 }
