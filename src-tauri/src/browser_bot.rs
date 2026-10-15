@@ -1110,17 +1110,32 @@ pub(crate) fn activate_release(
         }
         return Ok(false);
     }
+    if cancelled.load(Ordering::SeqCst) {
+        return Ok(false);
+    }
     let part = serde_json::to_string(part_number).map_err(|e| e.to_string())?;
+    let expression = if perform_add {
+        format!(
+            "Array.from(document.querySelectorAll('form[data-part-number]')).some(form => form.getAttribute('data-part-number')?.toUpperCase() === {part} && form.querySelector('[data-autom=\"add-to-cart\"]'))"
+        )
+    } else {
+        let script = fs::read_to_string(extension.dir.join("release-ready.js"))
+            .map_err(|e| format!("读取发售准备脚本失败：{e}"))?;
+        format!("({script})({part})")
+    };
     let ready = cdp_call_with_session(
         &mut browser,
         5,
         "Runtime.evaluate",
         serde_json::json!({
-            "expression": format!("Array.from(document.querySelectorAll('form[data-part-number]')).some(form => form.getAttribute('data-part-number')?.toUpperCase() === {part} && form.querySelector('[data-autom=\"add-to-cart\"]'))"),
+            "expression": expression,
             "returnByValue": true,
         }),
         Some(session),
     )?;
+    if let Some(exception) = ready.get("exceptionDetails") {
+        return Err(format!("检查发售商品页失败：{exception}"));
+    }
     if ready["result"]["value"].as_bool() != Some(true) {
         return Ok(false);
     }
