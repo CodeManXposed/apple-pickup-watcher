@@ -45,6 +45,21 @@ fn official_url(input: &str, base: &Url, part: &str) -> Result<Url, String> {
     Ok(url)
 }
 
+pub(crate) fn product_url(
+    region: &Region,
+    target: &Target,
+    plan: Option<&TaskPlan>,
+) -> Result<Url, String> {
+    let base = Url::parse(region.base_url).map_err(|_| "地区官网 URL 无效".to_owned())?;
+    let initial = plan
+        .and_then(|plan| plan.product_url.as_deref())
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .or_else(|| region.product_page_url(&target.part_number))
+        .ok_or("SKU 无效，无法生成 Apple 商品 URL")?;
+    official_url(&initial, &base, &target.part_number)
+}
+
 fn add_url(product: &Url, part: &str, token: &str) -> Url {
     let mut url = product.clone();
     url.set_fragment(None);
@@ -87,13 +102,7 @@ impl DirectCart {
         plan: Option<&TaskPlan>,
     ) -> Result<Self, String> {
         let base = Url::parse(region.base_url).map_err(|_| "地区官网 URL 无效".to_owned())?;
-        let initial = plan
-            .and_then(|plan| plan.product_url.as_deref())
-            .filter(|value| !value.trim().is_empty())
-            .map(str::to_owned)
-            .or_else(|| region.product_page_url(&target.part_number))
-            .ok_or("SKU 无效，无法生成 Apple 商品 URL")?;
-        let product = official_url(&initial, &base, &target.part_number)?;
+        let product = product_url(region, target, plan)?;
         let bag = Url::parse(&region.bag_url()).map_err(|_| "购物袋 URL 无效".to_owned())?;
         let cookies = Arc::new(wreq::cookie::Jar::default());
         let emulation = wreq::IntoEmulation::into_emulation(wreq_util::Emulation::Chrome149);
@@ -250,6 +259,7 @@ impl DirectCart {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use apw_core::config::{AddMethod, TaskMode};
     use apw_core::model::region_by_locale;
 
     #[test]
@@ -288,6 +298,37 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn configured_product_url_is_used_for_api_session_and_prewarm() {
+        let cn = region_by_locale("zh_CN").unwrap();
+        let target = Target {
+            locale: "zh_CN".into(),
+            store_number: "R683".into(),
+            store_title: "测试门店".into(),
+            part_number: "MJYE4CH/A".into(),
+            product_name: "测试商品".into(),
+            companion_part: None,
+            pickup_location: None,
+        };
+        let plan = TaskPlan {
+            target_key: target.key().0,
+            mode: TaskMode::Release,
+            add_method: AddMethod::Api,
+            product_url: Some(
+                "https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro/MJYE4CH/A".into(),
+            ),
+            release_at_ms: Some(1_000_000),
+            retry_delay_ms: 3_000,
+        };
+        assert_eq!(
+            product_url(cn, &target, Some(&plan)).unwrap().as_str(),
+            plan.product_url.as_deref().unwrap()
+        );
+        let mut other = plan.clone();
+        other.product_url = Some("https://evil.example/shop/buy-iphone/MJYE4CH/A".into());
+        assert!(product_url(cn, &target, Some(&other)).is_err());
     }
 
     #[test]

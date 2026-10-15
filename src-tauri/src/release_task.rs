@@ -9,7 +9,7 @@ use apw_core::model::{Target, region_by_locale};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::browser_bot;
-use crate::direct_cart::{AddOutcome, DirectCart};
+use crate::direct_cart::{self, AddOutcome, DirectCart};
 use crate::payment_bridge::{self, PaymentBridge, PaymentLink};
 use crate::{NOTICE_CHANNEL, browser_task_url};
 
@@ -165,9 +165,20 @@ pub(crate) async fn run(
         fail(&app, &task_id, "发售任务地区无效");
         return;
     };
-    let Some(prewarm_url) = region.product_page_url(&target.part_number) else {
-        fail(&app, &task_id, "发售任务零件号无效");
-        return;
+    let prewarm_url = if plan.add_method == AddMethod::Api {
+        match direct_cart::product_url(region, &target, Some(&plan)) {
+            Ok(url) => url.to_string(),
+            Err(err) => {
+                fail(&app, &task_id, &format!("发售任务商品地址无效：{err}"));
+                return;
+            }
+        }
+    } else {
+        let Some(url) = region.product_page_url(&target.part_number) else {
+            fail(&app, &task_id, "发售任务零件号无效");
+            return;
+        };
+        url
     };
     let Some(base) = region.auto_add_url(&target.part_number) else {
         fail(&app, &task_id, "发售任务加车入口无效");
