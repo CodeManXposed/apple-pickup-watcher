@@ -1404,7 +1404,7 @@ export default function App() {
                         </div>
                         {addMethod === "api" && (
                           <div className="mt-3">
-                            <Label htmlFor={`task-product-url-${key}`} className="text-muted-foreground text-xs">Apple 商品 URL · 可选，留空按 SKU 解析</Label>
+                            <Label htmlFor={`task-product-url-${key}`} className="text-muted-foreground text-xs">Apple 商品或机型 URL · 可选，留空按 SKU 解析</Label>
                             <Input
                               id={`task-product-url-${key}`}
                               type="url"
@@ -1417,7 +1417,7 @@ export default function App() {
                                 if (value !== (plan?.productUrl ?? "")) void onTaskPlanChange(row.target, { productUrl: value || null });
                               }}
                             />
-                            <p className="text-muted-foreground mt-1 text-xs">API 模式使用独立 HTTP 会话发出加车请求；成功后在独立浏览器核对购物袋并继续结账。Apple 验证或拒绝请求时会停止，不会当作加车成功。</p>
+                            <p className="text-muted-foreground mt-1 text-xs">机型页会与本任务 SKU 组合成具体商品页。API 模式使用独立 HTTP 会话加车；成功后在独立浏览器核对购物袋并继续结账。Apple 验证或拒绝请求时会停止。</p>
                           </div>
                         )}
                         <p className="text-muted-foreground mt-3 text-xs" role="status">{taskLabel}</p>

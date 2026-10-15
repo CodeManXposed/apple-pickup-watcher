@@ -52,17 +52,37 @@ fn official_url(input: &str, base: &Url, part: &str) -> Result<Url, String> {
         || !url
             .path()
             .starts_with(&format!("{}/shop/", base.path().trim_end_matches('/')))
-        || !url
-            .path()
-            .to_ascii_uppercase()
-            .ends_with(&format!("/{}", part.to_ascii_uppercase()))
     {
-        return Err("商品 URL 必须是当前地区 Apple 官网且路径末尾与 SKU 一致".into());
+        return Err("商品 URL 必须是当前地区 Apple 官网商店页面".into());
     }
     // 商品页 URL 可能来自复制的加车结果或旧任务链接。查询参数和片段
     // 不属于商品身份；保留它们会让预热或会话初始化提前执行加车动作。
     url.set_query(None);
     url.set_fragment(None);
+    let path = url.path().trim_end_matches('/').to_owned();
+    if !path
+        .to_ascii_uppercase()
+        .ends_with(&format!("/{}", part.to_ascii_uppercase()))
+    {
+        // 官网机型页没有 SKU：例如 /shop/buy-iphone/iphone-18-pro。
+        // 只接受机型页这一层，避免把别的 SKU 页面当作机型页继续拼接。
+        let shop_prefix = format!("{}/shop/", base.path().trim_end_matches('/'));
+        let segments: Vec<_> = path
+            .strip_prefix(&shop_prefix)
+            .unwrap_or_default()
+            .split('/')
+            .collect();
+        if segments.len() != 2
+            || !segments[0].starts_with("buy-")
+            || segments[1].is_empty()
+            || !segments[1]
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err("商品 URL 须为目标 SKU 页面或 Apple 官网机型页".into());
+        }
+        url.set_path(&format!("{path}/{}", part.to_ascii_uppercase()));
+    }
     Ok(url)
 }
 
@@ -362,6 +382,16 @@ mod tests {
             )
             .is_ok()
         );
+        assert_eq!(
+            official_url(
+                "https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro/?cid=example#details",
+                &base,
+                "MJYE4CH/A"
+            )
+            .unwrap()
+            .as_str(),
+            "https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro/MJYE4CH/A"
+        );
         assert!(
             official_url(
                 "https://evil.example/shop/pdpAddToBag/MJYE4CH/A",
@@ -381,6 +411,14 @@ mod tests {
         assert!(
             official_url(
                 "https://www.apple.com.cn/shop/pdpAddToBag/OTHERCH/A",
+                &base,
+                "MJYE4CH/A"
+            )
+            .is_err()
+        );
+        assert!(
+            official_url(
+                "https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro/OTHERCH/A",
                 &base,
                 "MJYE4CH/A"
             )
@@ -427,6 +465,11 @@ mod tests {
         let mut other = plan.clone();
         other.product_url = Some("https://evil.example/shop/buy-iphone/MJYE4CH/A".into());
         assert!(product_url(cn, &target, Some(&other)).is_err());
+        other.product_url = Some("https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro".into());
+        assert_eq!(
+            product_url(cn, &target, Some(&other)).unwrap().as_str(),
+            "https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro/MJYE4CH/A"
+        );
     }
 
     #[test]
