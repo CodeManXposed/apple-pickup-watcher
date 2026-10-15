@@ -271,13 +271,13 @@ test('a closed checkout source cannot authorize payment links after one hour', a
   assert.equal((await app.send({ type: 'apw-payment-link', kind: 'cashier', url: alipay }, alipay, 2))?.reason, 'no-active-checkout');
 });
 
-async function capture({ flow, nodes, now = 0 }) {
+async function capture({ flow, nodes, images = [], barcodeDetector, now = 0 }) {
   const sent = [];
   const clock = { now: () => now };
   const document = {
     documentElement: {},
     querySelectorAll(selector) {
-      if (selector === 'canvas, img') return [];
+      if (selector === 'canvas, img') return images;
       return nodes;
     },
     getElementById() { return null; },
@@ -297,6 +297,7 @@ async function capture({ flow, nodes, now = 0 }) {
     MutationObserver: class { observe() {} },
     setTimeout(callback) { callback(); },
     setInterval() {},
+    BarcodeDetector: barcodeDetector,
   });
   await new Promise(setImmediate);
   return sent;
@@ -311,6 +312,28 @@ test('captures the QR target encoded in a visible cashier image', async () => {
     },
   };
   const sent = await capture({ flow: { phase: 'order-submitted' }, nodes: [image] });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, 'qr');
+  assert.equal(sent[0].url, qr);
+});
+
+test('a blocked image does not hide a later readable payment QR', async () => {
+  const qr = 'https://qr.alipay.com/second-image';
+  const image = (blocked) => ({
+    blocked,
+    getClientRects() { return [1]; }, closest() { return null; },
+    getAttribute() { return null; },
+  });
+  const sent = await capture({
+    flow: { phase: 'order-submitted' },
+    nodes: [], images: [image(true), image(false)], now: 2000,
+    barcodeDetector: class {
+      async detect(node) {
+        if (node.blocked) throw new Error('image pixels unavailable');
+        return [{ rawValue: qr }];
+      }
+    },
+  });
   assert.equal(sent.length, 1);
   assert.equal(sent[0].kind, 'qr');
   assert.equal(sent[0].url, qr);

@@ -54,15 +54,18 @@
   async function findQrInPixels() {
     if (typeof BarcodeDetector !== 'function' || Date.now() - lastPixelScan < 1000) return null;
     lastPixelScan = Date.now();
+    let detector;
     try {
-      const detector = new BarcodeDetector({ formats: ['qr_code'] });
-      for (const node of Array.from(document.querySelectorAll('canvas, img')).filter(visible).slice(0, 8)) {
+      detector = new BarcodeDetector({ formats: ['qr_code'] });
+    } catch { return null; }
+    for (const node of Array.from(document.querySelectorAll('canvas, img')).filter(visible).slice(0, 8)) {
+      try {
         for (const code of await detector.detect(node)) {
           const target = qrTarget(code.rawValue);
           if (target) return target;
         }
-      }
-    } catch { /* 不支持像素解码时仍可转发收银台地址。 */ }
+      } catch { /* 单张图片不能读取时继续检查其他二维码；仍可转发收银台地址。 */ }
+    }
     return null;
   }
 
