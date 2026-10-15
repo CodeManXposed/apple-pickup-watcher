@@ -121,11 +121,23 @@ async fn direct_release_add(
         .ok_or("地区官网缺少域名")?
         .to_owned();
     let app_copy = app.clone();
-    let browser_cookies =
-        tauri::async_runtime::spawn_blocking(move || browser_bot::apple_cookies(&app_copy, &host))
-            .await
-            .map_err(|err| err.to_string())??;
-    session.seed_browser_cookies(&browser_cookies);
+    match tauri::async_runtime::spawn_blocking(move || browser_bot::apple_cookies(&app_copy, &host))
+        .await
+    {
+        Ok(Ok(cookies)) => session.seed_browser_cookies(&cookies),
+        Ok(Err(err)) => {
+            let _ = app.emit(
+                NOTICE_CHANNEL,
+                format!("读取独立浏览器 Apple 会话失败：{err}；本轮使用新 HTTP 会话"),
+            );
+        }
+        Err(err) => {
+            let _ = app.emit(
+                NOTICE_CHANNEL,
+                format!("读取独立浏览器 Apple 会话中断：{err}；本轮使用新 HTTP 会话"),
+            );
+        }
+    }
     let cookies = match session.add().await? {
         AddOutcome::Confirmed(cookies) => cookies,
         AddOutcome::Stop(reason) => return Ok(DirectReleaseResult::NoRetry(reason)),
@@ -335,6 +347,10 @@ pub(crate) async fn run(
         }
         let result = match result {
             Ok(true) if plan.add_method == AddMethod::Api => {
+                if cancelled.load(Ordering::SeqCst) {
+                    fail(&app, &task_id, "发售任务已暂停");
+                    return;
+                }
                 match direct_release_add(
                     &app,
                     &target,

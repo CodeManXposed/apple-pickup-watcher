@@ -1321,7 +1321,7 @@ export default function App() {
             <section className="tasks-list bg-card flex min-h-0 flex-col overflow-hidden rounded-xl border shadow-sm shadow-black/10">
               <div className="border-b px-4 py-3">
                 <h2 className="font-semibold">任务队列</h2>
-                <p className="text-muted-foreground text-xs">每条任务可单独选择触发模式、加车方式、开售时间和重试延迟。先到的任务占用本轮执行名额。</p>
+                <p className="text-muted-foreground text-xs">每条任务独立设置触发时机和加车引擎：发售或补货 × API 直连或 Chrome 模拟。先到的任务占用本轮执行名额。</p>
               </div>
               <ScrollArea className="min-h-0 flex-1">
                 <div className="grid gap-3 p-3">
@@ -1351,7 +1351,7 @@ export default function App() {
                         </div>
                         <div className="mt-4 grid gap-3 sm:grid-cols-2 2xl:grid-cols-[minmax(130px,0.8fr)_minmax(130px,0.8fr)_minmax(190px,1.3fr)_minmax(130px,0.8fr)]">
                           <div>
-                            <Label htmlFor={`task-mode-${key}`} className="text-muted-foreground text-xs">任务模式</Label>
+                            <Label htmlFor={`task-mode-${key}`} className="text-muted-foreground text-xs">触发模式</Label>
                             <select
                               id={`task-mode-${key}`}
                               className="border-input bg-background mt-1 h-9 w-full rounded-md border px-2 text-sm"
@@ -1364,7 +1364,7 @@ export default function App() {
                             </select>
                           </div>
                           <div>
-                            <Label htmlFor={`task-add-method-${key}`} className="text-muted-foreground text-xs">加车方式</Label>
+                            <Label htmlFor={`task-add-method-${key}`} className="text-muted-foreground text-xs">加车引擎</Label>
                             <select
                               id={`task-add-method-${key}`}
                               className="border-input bg-background mt-1 h-9 w-full rounded-md border px-2 text-sm"
@@ -1372,8 +1372,8 @@ export default function App() {
                               disabled={taskSaving}
                               onChange={(event) => void onTaskPlanChange(row.target, { addMethod: event.target.value as TaskPlan["addMethod"] })}
                             >
-                              <option value="browser">Chrome · 页面操作</option>
-                              <option value="api">API · 直接请求</option>
+                              <option value="browser">Chrome · 页面模拟</option>
+                              <option value="api">API · HTTP 直连</option>
                             </select>
                           </div>
                           <div>
@@ -1410,6 +1410,9 @@ export default function App() {
                             />
                           </div>
                         </div>
+                        {addMethod === "browser" && (
+                          <p className="text-muted-foreground mt-3 text-xs">Chrome 模式在独立浏览器中操作 Apple 商品页；需要验证时可在该浏览器完成。</p>
+                        )}
                         {addMethod === "api" && (
                           <div className="mt-3">
                             <Label htmlFor={`task-product-url-${key}`} className="text-muted-foreground text-xs">Apple 商品或机型 URL · 可选，留空按 SKU 解析</Label>
@@ -1425,7 +1428,7 @@ export default function App() {
                                 if (value !== (plan?.productUrl ?? "")) void onTaskPlanChange(row.target, { productUrl: value || null });
                               }}
                             />
-                            <p className="text-muted-foreground mt-1 text-xs">机型页会与本任务 SKU 组合成具体商品页。API 模式使用独立 HTTP 会话加车；成功后在独立浏览器核对购物袋并继续结账。Apple 验证或拒绝请求时会停止。</p>
+                            <p className="text-muted-foreground mt-1 text-xs">机型页会与本任务 SKU 组合成具体商品页。API 模式直接请求 Apple 网页加车端点；发售时仍在 Chrome 待命，成功后由 Chrome 核对购物袋并继续结账。Apple 验证或拒绝请求时会停止。</p>
                           </div>
                         )}
                         <p className="text-muted-foreground mt-3 text-xs" role="status">{taskLabel}</p>
