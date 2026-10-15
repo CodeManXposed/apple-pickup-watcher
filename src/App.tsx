@@ -343,6 +343,8 @@ export default function App() {
     const next: TaskPlan = {
       targetKey: key,
       mode: existing?.mode ?? "restock",
+      addMethod: existing?.addMethod ?? "browser",
+      productUrl: existing?.productUrl ?? null,
       releaseAtMs: existing?.releaseAtMs ?? null,
       retryDelayMs: existing?.retryDelayMs ?? 3000,
       ...patch,
@@ -1259,14 +1261,14 @@ export default function App() {
               </div>
               {taskFeedback && <p role="alert" className="text-destructive mt-2 text-sm">{taskFeedback}</p>}
               <p className="text-muted-foreground mt-2 text-xs">
-                每轮最多执行一个购买任务。发售模式提前 10 分钟打开独立浏览器，在原标签页等待 Apple 放行；补货模式在库存命中时启动。
+                每轮最多执行一个购买任务。发售模式提前 10 分钟打开独立浏览器等待 Apple 放行；补货模式在库存命中时启动。加车方式可逐项选择。
               </p>
             </section>
 
             <section className="tasks-list bg-card flex min-h-0 flex-col overflow-hidden rounded-xl border shadow-sm shadow-black/10">
               <div className="border-b px-4 py-3">
                 <h2 className="font-semibold">任务队列</h2>
-                <p className="text-muted-foreground text-xs">每条任务可单独选择模式、开售时间和重试延迟。先到的任务占用本轮执行名额。</p>
+                <p className="text-muted-foreground text-xs">每条任务可单独选择触发模式、加车方式、开售时间和重试延迟。先到的任务占用本轮执行名额。</p>
               </div>
               <ScrollArea className="min-h-0 flex-1">
                 <div className="grid gap-3 p-3">
@@ -1276,6 +1278,7 @@ export default function App() {
                     const key = targetKey(row.target);
                     const plan = (ui.settings.taskPlans ?? []).find((item) => item.targetKey === key);
                     const mode = plan?.mode ?? "restock";
+                    const addMethod = plan?.addMethod ?? "browser";
                     const current = ui.botStatus?.partNumber === row.target.partNumber &&
                       ui.botStatus.storeNumber === row.target.storeNumber;
                     const taskLabel = current && ui.botStatus
@@ -1293,7 +1296,7 @@ export default function App() {
                           </div>
                           <StatusBadge availability={row.availability} />
                         </div>
-                        <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(130px,0.8fr)_minmax(190px,1.3fr)_minmax(130px,0.8fr)]">
+                        <div className="mt-4 grid gap-3 sm:grid-cols-2 2xl:grid-cols-[minmax(130px,0.8fr)_minmax(130px,0.8fr)_minmax(190px,1.3fr)_minmax(130px,0.8fr)]">
                           <div>
                             <Label htmlFor={`task-mode-${key}`} className="text-muted-foreground text-xs">任务模式</Label>
                             <select
@@ -1305,6 +1308,19 @@ export default function App() {
                             >
                               <option value="restock">Restock · 补货</option>
                               <option value="release">Release · 发售</option>
+                            </select>
+                          </div>
+                          <div>
+                            <Label htmlFor={`task-add-method-${key}`} className="text-muted-foreground text-xs">加车方式</Label>
+                            <select
+                              id={`task-add-method-${key}`}
+                              className="border-input bg-background mt-1 h-9 w-full rounded-md border px-2 text-sm"
+                              value={addMethod}
+                              disabled={taskSaving}
+                              onChange={(event) => void onTaskPlanChange(row.target, { addMethod: event.target.value as TaskPlan["addMethod"] })}
+                            >
+                              <option value="browser">Chrome · 页面操作</option>
+                              <option value="api">API · 直接请求</option>
                             </select>
                           </div>
                           <div>
@@ -1341,6 +1357,24 @@ export default function App() {
                             />
                           </div>
                         </div>
+                        {addMethod === "api" && (
+                          <div className="mt-3">
+                            <Label htmlFor={`task-product-url-${key}`} className="text-muted-foreground text-xs">Apple 商品 URL · 可选，留空按 SKU 解析</Label>
+                            <Input
+                              id={`task-product-url-${key}`}
+                              type="url"
+                              placeholder="https://www.apple.com.cn/shop/buy-iphone/…"
+                              className="mt-1 h-9"
+                              defaultValue={plan?.productUrl ?? ""}
+                              disabled={taskSaving}
+                              onBlur={(event) => {
+                                const value = event.target.value.trim();
+                                if (value !== (plan?.productUrl ?? "")) void onTaskPlanChange(row.target, { productUrl: value || null });
+                              }}
+                            />
+                            <p className="text-muted-foreground mt-1 text-xs">API 模式使用独立 HTTP 会话发出加车请求；成功后在独立浏览器核对购物袋并继续结账。Apple 验证或拒绝请求时会停止，不会当作加车成功。</p>
+                          </div>
+                        )}
                         <p className="text-muted-foreground mt-3 text-xs" role="status">{taskLabel}</p>
                       </article>
                     );

@@ -145,6 +145,8 @@ dependencies = [
  "tokio",
  "tungstenite",
  "uuid",
+ "wreq",
+ "wreq-util",
 ]
 
 [[package]]

@@ -100,6 +100,8 @@ export interface Settings {
 export interface TaskPlan {
   targetKey: string;
   mode: "restock" | "release";
+  addMethod: "api" | "browser";
+  productUrl: string | null;
   /** UTC Unix 毫秒；发售模式必须填写。 */
   releaseAtMs: number | null;
   retryDelayMs: number;

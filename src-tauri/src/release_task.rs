@@ -4,11 +4,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use apw_core::config::{Settings, TaskMode, TaskPlan};
+use apw_core::config::{AddMethod, Settings, TaskMode, TaskPlan};
 use apw_core::model::{Target, region_by_locale};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::browser_bot;
+use crate::direct_cart::{AddOutcome, DirectCart};
 use crate::payment_bridge::{self, PaymentBridge, PaymentLink};
 use crate::{NOTICE_CHANNEL, browser_task_url};
 
@@ -83,6 +84,68 @@ fn fail(app: &AppHandle, task_id: &str, reason: &str) {
 async fn wait_or_cancel(cancelled: &AtomicBool, duration: Duration) -> bool {
     tokio::time::sleep(duration).await;
     cancelled.load(Ordering::SeqCst)
+}
+
+enum DirectReleaseResult {
+    Opened,
+    NoRetry(String),
+}
+
+async fn direct_release_add(
+    app: &AppHandle,
+    target: &Target,
+    plan: &TaskPlan,
+    task_id: &str,
+    tab_id: &str,
+    checkout_area: Option<&(String, String, String)>,
+) -> Result<DirectReleaseResult, String> {
+    let region = region_by_locale(&target.locale).ok_or("发售任务地区无效")?;
+    let session = DirectCart::new(region, target, Some(plan))?;
+    let host = reqwest::Url::parse(region.base_url)
+        .map_err(|_| "地区官网 URL 无效")?
+        .host_str()
+        .ok_or("地区官网缺少域名")?
+        .to_owned();
+    let app_copy = app.clone();
+    let browser_cookies =
+        tauri::async_runtime::spawn_blocking(move || browser_bot::apple_cookies(&app_copy, &host))
+            .await
+            .map_err(|err| err.to_string())??;
+    session.seed_browser_cookies(&browser_cookies);
+    let cookies = match session.add().await? {
+        AddOutcome::Confirmed(cookies) => cookies,
+        AddOutcome::Stop(reason) => return Ok(DirectReleaseResult::NoRetry(reason)),
+    };
+    let handoff = async {
+        let bag = format!(
+            "{}#apw-checkout=1&apw-store={}&apw-part={}",
+            region.bag_url(),
+            target.store_number,
+            target.part_number.to_ascii_uppercase().replace('/', "%2F")
+        );
+        let checkout = browser_task_url(
+            &bag,
+            task_id,
+            &target.product_name,
+            checkout_area.map(|(province, city, district)| {
+                (province.as_str(), city.as_str(), district.as_str())
+            }),
+        )?;
+        let app_copy = app.clone();
+        let tab_id = tab_id.to_owned();
+        tauri::async_runtime::spawn_blocking(move || {
+            browser_bot::open_direct_bag(&app_copy, checkout.as_str(), &cookies, Some(&tab_id))
+        })
+        .await
+        .map_err(|err| err.to_string())?
+    }
+    .await;
+    Ok(match handoff {
+        Ok(()) => DirectReleaseResult::Opened,
+        Err(err) => DirectReleaseResult::NoRetry(format!(
+            "Apple 已确认直连加车，但浏览器交接失败：{err}。请手动检查购物袋，本轮不会再次加车。"
+        )),
+    })
 }
 
 pub(crate) async fn run(
@@ -187,8 +250,17 @@ pub(crate) async fn run(
         let stop = cancelled.clone();
         let refresh_missing =
             last_missing_refresh.is_none_or(|last| last.elapsed() >= Duration::from_secs(60));
+        let perform_add = plan.add_method == AddMethod::Browser;
         let result = tauri::async_runtime::spawn_blocking(move || {
-            browser_bot::activate_release(&app_copy, &id, &part, &url, refresh_missing, &stop)
+            browser_bot::activate_release(
+                &app_copy,
+                &id,
+                &part,
+                &url,
+                refresh_missing,
+                perform_add,
+                &stop,
+            )
         })
         .await
         .map_err(|err| err.to_string())
@@ -196,19 +268,43 @@ pub(crate) async fn run(
         if refresh_missing {
             last_missing_refresh = Some(Instant::now());
         }
+        let result = match result {
+            Ok(true) if plan.add_method == AddMethod::Api => {
+                match direct_release_add(
+                    &app,
+                    &target,
+                    &plan,
+                    &task_id,
+                    &tab_id,
+                    checkout_area.as_ref(),
+                )
+                .await
+                {
+                    Ok(DirectReleaseResult::Opened) => Ok(true),
+                    Ok(DirectReleaseResult::NoRetry(err)) => {
+                        fail(&app, &task_id, &err);
+                        return;
+                    }
+                    Err(err) => Err(err),
+                }
+            }
+            other => other,
+        };
         match result {
             Ok(true) => {
                 stage(&app, &target, &task_id, "launched");
                 let watchdog_app = app.clone();
+                let watchdog_message = if plan.add_method == AddMethod::Api {
+                    "发售任务直连加车已被确认，但购物袋在 90 秒内未完成核对；请检查独立浏览器。"
+                } else {
+                    "发售任务已放行，但 90 秒内未确认加车；请检查 Apple 页面。"
+                };
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(Duration::from_secs(90)).await;
                     let bridge = watchdog_app.state::<PaymentBridge>();
                     if let Some(status) = bridge.fail_if_stage(&task_id, "launched") {
                         let _ = watchdog_app.emit(payment_bridge::STATUS_CHANNEL, status);
-                        let _ = watchdog_app.emit(
-                            NOTICE_CHANNEL,
-                            "发售任务已放行，但 90 秒内未确认加车；请检查 Apple 页面。",
-                        );
+                        let _ = watchdog_app.emit(NOTICE_CHANNEL, watchdog_message);
                     }
                 });
                 return;
@@ -254,6 +350,8 @@ mod tests {
         settings.task_plans.push(TaskPlan {
             target_key: target.key().0,
             mode: TaskMode::Release,
+            add_method: apw_core::config::AddMethod::Browser,
+            product_url: None,
             release_at_ms: Some(1_000_000),
             retry_delay_ms: 3_000,
         });

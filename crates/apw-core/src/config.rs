@@ -171,11 +171,25 @@ pub enum TaskMode {
     Release,
 }
 
+/// 加车传输方式，与发售/补货触发方式独立。旧任务保持浏览器行为。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddMethod {
+    Api,
+    #[default]
+    Browser,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskPlan {
     pub target_key: String,
     pub mode: TaskMode,
+    #[serde(default)]
+    pub add_method: AddMethod,
+    /// 可选的 Apple 官方商品链接；为空时由 SKU 解析商品页。
+    #[serde(default)]
+    pub product_url: Option<String>,
     /// UTC Unix 毫秒。发售模式必须填写；客户端按本地时区输入并转换。
     pub release_at_ms: Option<u64>,
     /// 自动任务重试间隔，独立于库存监控间隔。

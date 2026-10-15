@@ -99,19 +99,23 @@ fn 样例设置() -> Settings {
 
 #[test]
 fn 发售任务配置保存并将重试延迟限制在安全范围() {
-    use apw_core::config::{TaskMode, TaskPlan};
+    use apw_core::config::{AddMethod, TaskMode, TaskPlan};
 
     let mut settings = 样例设置();
     let key = settings.targets[0].key().0;
     settings.task_plans.push(TaskPlan {
         target_key: key.clone(),
         mode: TaskMode::Release,
+        add_method: AddMethod::Api,
+        product_url: Some("https://www.apple.com.cn/shop/pdpAddToBag/MJYE4CH/A".into()),
         release_at_ms: Some(1_800_000_000_000),
         retry_delay_ms: 500,
     });
     settings.task_plans.push(TaskPlan {
         target_key: "zh_CN|R000|MISSING/A".into(),
         mode: TaskMode::Release,
+        add_method: AddMethod::Browser,
+        product_url: None,
         release_at_ms: Some(1_800_000_000_000),
         retry_delay_ms: 3_000,
     });
@@ -122,9 +126,18 @@ fn 发售任务配置保存并将重试延迟限制在安全范围() {
 
     let json = serde_json::to_value(&settings).unwrap();
     assert_eq!(json["taskPlans"][0]["mode"], "release");
+    assert_eq!(json["taskPlans"][0]["addMethod"], "api");
     assert_eq!(json["taskPlans"][0]["releaseAtMs"], 1_800_000_000_000_u64);
     assert_eq!(json["taskPlans"][0]["retryDelayMs"], 1_000);
     assert_eq!(serde_json::from_value::<Settings>(json).unwrap(), settings);
+
+    let older_plan = serde_json::json!({
+        "targetKey": key, "mode": "release", "releaseAtMs": 1_800_000_000_000_u64,
+        "retryDelayMs": 3_000
+    });
+    let decoded: TaskPlan = serde_json::from_value(older_plan).unwrap();
+    assert_eq!(decoded.add_method, AddMethod::Browser);
+    assert_eq!(decoded.product_url, None);
 
     let old = serde_json::json!({"locale": "zh_CN", "targets": []});
     assert!(

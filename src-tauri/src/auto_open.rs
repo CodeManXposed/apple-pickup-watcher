@@ -1,6 +1,7 @@
 //! 每次监控会话只自动打开一次购买入口，避免多个目标同时到货打断结账。
 
 use apw_core::model::region_by_locale;
+use std::future::Future;
 
 const MAX_AUTO_ADD_ATTEMPTS: u8 = 3;
 
@@ -60,22 +61,19 @@ impl AutoOpenBag {
         true
     }
 
-    pub(crate) fn open_if_needed<E>(
+    fn prepare_url(
         &mut self,
         enabled: bool,
         locale: &str,
         auto_add_target: Option<(&str, &str)>,
-        open: impl FnOnce(&str) -> Result<(), E>,
-    ) -> Result<(), E> {
+    ) -> Option<String> {
         if !enabled
             || self.opened_this_run
             || (auto_add_target.is_some() && self.retry_limit_reached())
         {
-            return Ok(());
+            return None;
         }
-        let Some(region) = region_by_locale(locale) else {
-            return Ok(());
-        };
+        let region = region_by_locale(locale)?;
 
         // 整个会话使用首个有效命中的地区。其他地区仍逐项提醒，但不再导航浏览器。
         // 打开失败不消耗这次机会，后续仍有货的轮次可以有限重试。
@@ -87,26 +85,60 @@ impl AutoOpenBag {
                 {
                     format!("{url}&apw-store={store}")
                 }
-                _ => return Ok(()),
+                _ => return None,
             },
             None => region.bag_url(),
         };
         if auto_add_target.is_some() {
             self.attempted_since_cycle = true;
         }
-        match open(&url) {
+        Some(url)
+    }
+
+    fn finish<E>(&mut self, auto_add_target: bool, result: Result<(), E>) -> Result<(), E> {
+        match result {
             Ok(()) => {
                 self.opened_this_run = true;
-                self.auto_task_launched = auto_add_target.is_some();
+                self.auto_task_launched = auto_add_target;
                 Ok(())
             }
             Err(error) => {
-                if auto_add_target.is_some() {
+                if auto_add_target {
                     self.auto_add_failures += 1;
                 }
                 Err(error)
             }
         }
+    }
+
+    pub(crate) fn open_if_needed<E>(
+        &mut self,
+        enabled: bool,
+        locale: &str,
+        auto_add_target: Option<(&str, &str)>,
+        open: impl FnOnce(&str) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let Some(url) = self.prepare_url(enabled, locale, auto_add_target) else {
+            return Ok(());
+        };
+        self.finish(auto_add_target.is_some(), open(&url))
+    }
+
+    pub(crate) async fn open_if_needed_async<E, F, Fut>(
+        &mut self,
+        enabled: bool,
+        locale: &str,
+        auto_add_target: Option<(&str, &str)>,
+        open: F,
+    ) -> Result<(), E>
+    where
+        F: FnOnce(String) -> Fut,
+        Fut: Future<Output = Result<(), E>>,
+    {
+        let Some(url) = self.prepare_url(enabled, locale, auto_add_target) else {
+            return Ok(());
+        };
+        self.finish(auto_add_target.is_some(), open(url).await)
     }
 }
 

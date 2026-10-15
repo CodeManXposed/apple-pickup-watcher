@@ -24,6 +24,16 @@ const VERSION_FILE: &str = "current-version";
 const DEVTOOLS_FILE: &str = "DevToolsActivePort";
 static BROWSER_LAUNCH: Mutex<()> = Mutex::new(());
 
+#[derive(Clone)]
+pub(crate) struct SessionCookie {
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+    pub path: String,
+    pub http_only: bool,
+    pub secure: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct Releases {
     channels: Channels,
@@ -886,6 +896,124 @@ pub(crate) fn open_task(app: &AppHandle, url: &str) -> Result<(), String> {
     prewarm_task(app, url).map(|_| ())
 }
 
+/// 将直连加车会话的 Cookie 放入独立浏览器，然后从同一会话核对购物袋。
+/// Cookie 仅在本机内存与本机 CDP 连接中传递，不写入桌面设置。
+pub(crate) fn open_direct_bag(
+    app: &AppHandle,
+    url: &str,
+    cookies: &[SessionCookie],
+    target_id: Option<&str>,
+) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| "购物袋地址无效".to_owned())?;
+    if parsed.scheme() != "https"
+        || !matches!(
+            parsed.host_str(),
+            Some("www.apple.com" | "www.apple.com.cn")
+        )
+        || !parsed.path().ends_with("/shop/bag")
+    {
+        return Err("只能打开 Apple 官方购物袋".into());
+    }
+    let _guard = BROWSER_LAUNCH
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (mut browser, _) = loaded_browser(app)?;
+    let host = parsed.host_str().ok_or("购物袋地址缺少域名")?;
+    let cookie_params = cookies
+        .iter()
+        .filter(|cookie| {
+            let domain = cookie.domain.trim_start_matches('.');
+            domain == host || host.ends_with(&format!(".{domain}"))
+        })
+        .map(|cookie| {
+            serde_json::json!({
+                "name": cookie.name, "value": cookie.value,
+            "domain": cookie.domain, "path": cookie.path,
+            "secure": cookie.secure, "httpOnly": cookie.http_only,
+                "url": parsed.origin().ascii_serialization(),
+            })
+        })
+        .collect::<Vec<_>>();
+    if cookie_params.is_empty() {
+        return Err("直连会话没有适用于当前 Apple 商店的 Cookie".into());
+    }
+    cdp_call(
+        &mut browser,
+        2,
+        "Storage.setCookies",
+        serde_json::json!({"cookies": cookie_params}),
+    )?;
+    if let Some(target_id) = target_id {
+        let target = cdp_call(
+            &mut browser,
+            3,
+            "Target.getTargetInfo",
+            serde_json::json!({"targetId": target_id}),
+        )?;
+        let current = target["targetInfo"]["url"]
+            .as_str()
+            .ok_or("发售标签页已关闭")?;
+        let current = reqwest::Url::parse(current).map_err(|_| "发售标签页地址无效".to_owned())?;
+        if current.host_str() != parsed.host_str() || !current.path().contains("/shop/") {
+            return Err("发售标签页不是当前 Apple 商店页面".into());
+        }
+        let attached = cdp_call(
+            &mut browser,
+            4,
+            "Target.attachToTarget",
+            serde_json::json!({"targetId": target_id, "flatten": true}),
+        )?;
+        let session = attached["sessionId"].as_str().ok_or("无法连接发售标签页")?;
+        cdp_call_with_session(
+            &mut browser,
+            5,
+            "Page.navigate",
+            serde_json::json!({"url": url}),
+            Some(session),
+        )?;
+    } else {
+        let created = cdp_call(
+            &mut browser,
+            3,
+            "Target.createTarget",
+            serde_json::json!({"url": url}),
+        )?;
+        if created.get("targetId").and_then(Value::as_str).is_none() {
+            return Err("独立浏览器未打开购物袋".into());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn apple_cookies(app: &AppHandle, host: &str) -> Result<Vec<SessionCookie>, String> {
+    let _guard = BROWSER_LAUNCH
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (mut browser, _) = loaded_browser(app)?;
+    let result = cdp_call(&mut browser, 2, "Storage.getCookies", serde_json::json!({}))?;
+    let found = result["cookies"]
+        .as_array()
+        .ok_or("浏览器未返回 Cookie 列表")?;
+    Ok(found
+        .iter()
+        .filter_map(|cookie| {
+            let domain = cookie["domain"].as_str()?;
+            let bare = domain.trim_start_matches('.');
+            if host != bare && !host.ends_with(&format!(".{bare}")) {
+                return None;
+            }
+            Some(SessionCookie {
+                name: cookie["name"].as_str()?.to_owned(),
+                value: cookie["value"].as_str()?.to_owned(),
+                domain: domain.to_owned(),
+                path: cookie["path"].as_str().unwrap_or("/").to_owned(),
+                http_only: cookie["httpOnly"].as_bool().unwrap_or(false),
+                secure: cookie["secure"].as_bool().unwrap_or(true),
+            })
+        })
+        .collect())
+}
+
 pub(crate) fn prewarm_task(app: &AppHandle, url: &str) -> Result<String, String> {
     let parsed = reqwest::Url::parse(url).map_err(|_| "购买页面地址无效".to_owned())?;
     if parsed.scheme() != "https"
@@ -907,6 +1035,7 @@ pub(crate) fn activate_release(
     part_number: &str,
     task_url: &str,
     refresh_missing: bool,
+    perform_add: bool,
     cancelled: &AtomicBool,
 ) -> Result<bool, String> {
     let _guard = BROWSER_LAUNCH
@@ -971,6 +1100,9 @@ pub(crate) fn activate_release(
     }
     if cancelled.load(Ordering::SeqCst) {
         return Ok(false);
+    }
+    if !perform_add {
+        return Ok(true);
     }
     let script = fs::read_to_string(extension.dir.join("content.js"))
         .map_err(|e| format!("读取加车脚本失败：{e}"))?;
